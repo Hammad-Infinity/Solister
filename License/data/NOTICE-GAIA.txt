@@ -1,0 +1,16 @@
+Gaia DR3 / Hipparcos crossmatch attribution and license correction
+Applies to data/constellation-gaia-astrometry.js.
+Source described in supplied header: Gaia DR3 5/6-parameter solutions and gaiadr3.hipparcos2_best_neighbour; reference epoch J2016.0; RUWE <= 1.4 and project back-propagation residual <= 5 arcsec. Project selections/reindexing and omitted/zero radial velocities are adaptations, not a full unchanged Gaia release.
+
+Official current data license: CC BY-NC 3.0 IGO
+https://www.cosmos.esa.int/web/gaia-users/license
+https://creativecommons.org/licenses/by-nc/3.0/igo/
+Full text: CC-BY-NC-3.0-IGO.txt.
+Archive terms: https://www.cosmos.esa.int/web/esdc/terms-and-conditions
+Commercial use requires prior request for authorization/license to data.licences@esa.int under those terms. A separate commercial permission or earlier applicable CC BY 4.0 grant was NOT supplied. The original project's CC BY 4.0 header is not treated as evidence of such permission. V9 corrects that comment and points here; no numerical values are changed.
+
+Required acknowledgement (from Gaia credits):
+This work has made use of data from the European Space Agency (ESA) mission Gaia (https://www.cosmos.esa.int/gaia), processed by the Gaia Data Processing and Analysis Consortium (DPAC, https://www.cosmos.esa.int/web/gaia/dpac/consortium). Funding for the DPAC has been provided by national institutions, in particular the institutions participating in the Gaia Multilateral Agreement.
+
+Credit: ESA, Gaia DPAC. Retain applicable Hipparcos/ESA and crossmatch-table credits. Follow Gaia's publication citation guidance for the release, mission and used products; release overview: https://www.cosmos.esa.int/web/gaia/data-release-3 .
+No endorsement by ESA or DPAC is claimed. See saved official policies for full conditions.

@@ -1,0 +1,10 @@
+Official-source excerpt retrieved 2026-09-30 using page retrieval.
+URL: https://www.solarsystemscope.com/textures/
+Excerpt only; full CC BY 4.0 legal text is included under data/.
+
+“Distributed under Attribution 4.0 International license:
+You may use, adapt, and share these textures for any purpose, even commercially.”
+Linked license: https://creativecommons.org/licenses/by/4.0/
+
+“Textures in this pack are based on NASA elevation and imagery data. Colors and shades of the textures are tuned accordng to true-color photos made by Messenger, Viking and Cassini spacecrafts, and, of course, the Hubble Space Telescope.”
+“Some parts of the planets remain to be mapped. These ‘gaps’ are filled with fictional terrain that corresponds with the rest of the landscape.”

@@ -1,0 +1,23 @@
+Official-source text snapshot; retrieved 2026-09-30.
+URL: https://www.cosmos.esa.int/web/gaia-users/license
+Final URL: https://www.cosmos.esa.int/web/gaia-users/license
+HTML navigation/scripts/styles removed; this is not a new license grant.
+
+COSMOS License - Gaia Users - Cosmos
+License - Gaia Users
+GAIA DATA LICENSE
+Gaia data are distributed under the
+CC BY-NC 3.0 IGO
+license. For details and guidelines concerning commercial use of the Gaia data, please see the
+Terms and Conditions
+for the use of data in the ESA space science archives.
+Hidden
+My account
+placeholder
+PeopleEditorPersonalDetails
+portlet
+Close
+ESA uses cookies to track visits to our website only, no personal information is collected.
+        By continuing to use the site you are agreeing to our use of cookies.
+OK
+Find out more about our cookie policy.

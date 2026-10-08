@@ -1,0 +1,20 @@
+JPL solar-system numerical sources — provenance, not a blanket license
+Credit source calculations/catalogs to NASA/JPL-Caltech, Solar System Dynamics (Horizons and SBDB), and preserve the individual solution/model identifiers in the supplied metadata. This application transforms source data into offline interpolation tables, fitted coefficients and illustrative selections; it is not a NASA/JPL product and NASA/JPL do not endorse or warrant the resulting simulation.
+
+Sources:
+https://ssd.jpl.nasa.gov/horizons/
+https://ssd.jpl.nasa.gov/horizons/manual.html
+https://ssd-api.jpl.nasa.gov/doc/horizons.html
+https://ssd.jpl.nasa.gov/tools/sbdb_query.html
+https://ssd.jpl.nasa.gov/faq.html#a05
+https://www.jpl.nasa.gov/caltechjpl-privacy-policies-and-important-notices/
+
+Identified from local metadata:
+- smallbodies-meta.json: 68,155 catalog objects; SBDB query 2026-09-19, NEOWISE/albedo-derived sizes and custom Horizons DE441 resonant/secular fitting.
+- kuiper-meta.json: 24 named bodies, geometric heliocentric J2000 ecliptic TDB states; selected/converted offline Hermite tables.
+- Pluto/Charon: PLU060/DE440; Himalia: JUP347/DE442; Phoebe: SAT441L, plus supplied historical Horizons JSONs. Preserve per-file details rather than replacing them with one assumed solution identifier.
+- Body catalog identifies NEP098 for Triton/Nereid; actual binary/kernel-generation inputs not supplied.
+- V8 comet-ephemeris.json/bin and validation retain query/solution records and source-variation diagnostics. Fun motion and visible nuclei/comae/tails are illustrative project models, not mission imagery.
+
+JPL's SSD FAQ says permission is needed to publish information from the site, and its copyright notice warns that documents may be protected under U.S./foreign law. No separate redistribution permission was obtained here. An image-use policy or the fact that NASA sponsors JPL does not make every JPL document, kernel, fitted dataset or software component public domain. Confirm the terms for the actual files and intended use with JPL before release. This is not a claim that every numerical fact is copyrightable; it records an unresolved distribution question.
+No SPICE-toolkit license is assigned merely because a table originated from a named SPK solution; investigate any toolkit binaries separately if shipped.

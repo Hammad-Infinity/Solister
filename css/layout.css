@@ -1,0 +1,153 @@
+#canvas-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1;
+}
+#vignette {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+    background: radial-gradient(
+        ellipse at center,
+        rgba(0,0,0,0) 0%,
+        rgba(0,0,0,0) 45%,
+        rgba(0,0,0,0.35) 100%
+    );
+}
+#focus-line-layer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 8;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+#focus-line-layer.visible { opacity: 1; }
+#camera-distance {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9;
+    padding: 8px 16px;
+    background: #000000;
+    color: #ededed;
+    font-weight: 700;
+    font-size: 0.82rem;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+    transition: opacity 0.35s ease;
+}
+body.ui-idle #camera-distance { opacity: 0; }
+.planet-label {
+    display: none !important;
+    pointer-events: none !important;
+    pointer-events: none;
+    will-change: transform;
+    transform-origin: 50% 50%;
+    display: inline-block;
+    line-height: 0;
+    transition: opacity 0.35s ease;
+}
+body.ui-idle .planet-label {
+    opacity: 0 !important;
+    pointer-events: none;
+}
+body.ui-idle .planet-label > .label-box {
+    pointer-events: none !important;
+}
+.planet-label > .label-box {
+    display: inline-block;
+    color: var(--text-primary);
+    font-size: calc(0.72rem * var(--label-scale, 1));
+    font-weight: 600;
+    letter-spacing: calc(2.2px * var(--label-scale, 1));
+    text-transform: uppercase;
+    padding: calc(3px * var(--label-scale, 1)) calc(9px * var(--label-scale, 1));
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    background: var(--panel-sunken);
+    white-space: nowrap;
+    line-height: 1;
+    pointer-events: auto;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.planet-label > .label-box:hover {
+    background: var(--panel-bg);
+    border-color: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+}
+.planet-label > .label-box:active {
+    background: var(--panel-raised);
+    border-color: rgba(255, 255, 255, 0.16);
+}
+.planet-label > .label-box:focus-visible {
+    outline: 1px solid rgba(255, 255, 255, 0.75);
+    outline-offset: 2px;
+}
+.planet-label[style*="opacity: 0"] > .label-box,
+.planet-label[style*="opacity: 0"]  > .label-box {
+    pointer-events: none;
+}
+.constellation-label {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    font: 500 11.5px/1 system-ui, sans-serif;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #86a6cc;
+    text-shadow: 0 0 10px rgba(4,8,14,.6);
+    pointer-events: none;
+    white-space: nowrap;
+    opacity: .62;
+    transition: opacity .5s ease;
+    will-change: transform, visibility, opacity;
+    contain: layout style paint;
+}
+.star-name-label {
+    position: absolute;
+    transform: translate(-50%, -150%);
+    font: 400 10.5px/1 system-ui, sans-serif;
+    color: #cbc2ac;
+    text-shadow: 0 0 9px rgba(4,8,14,.55);
+    pointer-events: none;
+    white-space: nowrap;
+    opacity: .7;
+    transition: opacity .5s ease;
+    will-change: transform, visibility, opacity;
+    contain: layout style paint;
+}
+#moon-flyout {
+    position: fixed;
+    z-index: 60;
+    min-width: 120px;
+    padding: 4px;
+    background: var(--panel-raised);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+@media (max-width: 768px) {
+    .planet-label > .label-box {
+        padding: 2px 7px;
+    }
+    .planet-label {
+        font-size: calc(0.55rem * var(--label-scale, 1));
+        letter-spacing: calc(1.5px * var(--label-scale, 1));
+    }
+}

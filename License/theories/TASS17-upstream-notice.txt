@@ -1,0 +1,39 @@
+//***********************************************************
+// (c) 2017 by Marcel Greter
+// AstroJS Saturnian Orbits utility lib
+// https://github.com/mgreter/ephem.js
+//***********************************************************
+// Test how much speed-up unrolling all
+// loops will bring, similar to how we do
+// with VSOP already (write out all terms)
+// ToDo: some data is superfluous for us
+//***********************************************************
+
+// This is an implementation of the tass17 theory.
+// Implementation was taken directly from GPL2 licensed Stellarium
+// https://github.com/Stellarium/stellarium/blob/master/src/core/planetsephems/tass17.c
+// Original sources can be found at ftp://ftp.imcce.fr/pub/ephem/satel/tass17
+
+/*
+  Copyright (c) 2017 Marcel Greter
+  Copyright (c) 2005 Johannes Gajdosik
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included
+  in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+*/
+

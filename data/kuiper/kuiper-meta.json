@@ -1,0 +1,266 @@
+{
+  "format": "kuiper-hermite-v1",
+  "generated": "2026-09-21",
+  "source": "NASA/JPL Horizons geometric heliocentric state vectors; J2000 ecliptic; TDB; AU and AU/day",
+  "sourceURL": "https://ssd.jpl.nasa.gov/horizons/",
+  "selection": "First 22 numbered objects by ascending H in an SBDB TNO query constrained to 30<=a<=50 AU, q>=30 AU, e<0.35, condition_code<=2, with i<=35 degrees; plus Albion and Arrokoth. Illustrative named selection, not a complete or unbiased survey. Pluto is excluded because the project already renders it.",
+  "startJD": 2378496.5,
+  "stepDays": 90.0,
+  "samplesPerBody": 1625,
+  "storedEndJD": 2524656.5,
+  "coverageStartJD": 2378496.5,
+  "coverageEndJD": 2524593.5,
+  "count": 24,
+  "binaryBytes": 1872040,
+  "sha256": "b46f2a90a0589297323ccc27affdcd65eb916abee9168f4bd1dc1ad7718dd1d8",
+  "objects": [
+    {
+      "pdes": "136472",
+      "name": "136472 Makemake (2005 FY9)",
+      "aAU": 45.57093317300052,
+      "e": 0.1588889953992523,
+      "iDeg": 29.02785603743067,
+      "qAU": 38.33021338173601,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "136108",
+      "name": "136108 Haumea (2003 EL61)",
+      "aAU": 43.06029023650952,
+      "e": 0.1944430148898797,
+      "iDeg": 28.20847393040364,
+      "qAU": 34.68751758088936,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "90482",
+      "name": "90482 Orcus (2004 DW)",
+      "aAU": 39.37686537914865,
+      "e": 0.2205240628250881,
+      "iDeg": 20.55681019612,
+      "qAU": 30.69331904442224,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "50000",
+      "name": "50000 Quaoar (2002 LM60)",
+      "aAU": 43.15617648834794,
+      "e": 0.03520023677935285,
+      "iDeg": 7.991575801906905,
+      "qAU": 41.63706885746655,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "55565",
+      "name": "55565 Aya (2002 AW197)",
+      "aAU": 47.36875987690542,
+      "e": 0.1286825927917718,
+      "iDeg": 24.34033767915258,
+      "qAU": 41.27322503861438,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "174567",
+      "name": "174567 Varda (2003 MW12)",
+      "aAU": 45.553792965197,
+      "e": 0.1422792008234468,
+      "iDeg": 21.51272002644964,
+      "qAU": 39.07243570763202,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "55636",
+      "name": "55636 (2002 TX300)",
+      "aAU": 43.41282467473518,
+      "e": 0.1210783627763523,
+      "iDeg": 25.85951069834817,
+      "qAU": 38.15647093962142,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "307261",
+      "name": "307261 Mani (2002 MS4)",
+      "aAU": 41.58863664738092,
+      "e": 0.1482654554299753,
+      "iDeg": 17.69991360489779,
+      "qAU": 35.42247849414523,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "145452",
+      "name": "145452 Ritona (2005 RN43)",
+      "aAU": 41.49809389728453,
+      "e": 0.02255407529729301,
+      "iDeg": 19.27813450132106,
+      "qAU": 40.56214276283104,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "208996",
+      "name": "208996 Achlys (2003 AZ84)",
+      "aAU": 39.65674190908469,
+      "e": 0.1749643183262652,
+      "iDeg": 13.54857109263982,
+      "qAU": 32.71822709392106,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "20000",
+      "name": "20000 Varuna (2000 WR106)",
+      "aAU": 43.2000227503935,
+      "e": 0.05161543734827757,
+      "iDeg": 17.14054429876356,
+      "qAU": 40.9702346826764,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "589683",
+      "name": "589683 (2010 RF43)",
+      "aAU": 49.25570830624505,
+      "e": 0.2453506546012399,
+      "iDeg": 30.63386493721642,
+      "qAU": 37.1707880304601,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 2
+    },
+    {
+      "pdes": "55637",
+      "name": "55637 Uni (2002 UX25)",
+      "aAU": 42.92456947386417,
+      "e": 0.1462441869199175,
+      "iDeg": 19.42327844654774,
+      "qAU": 36.6471007122714,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "202421",
+      "name": "202421 (2005 UQ513)",
+      "aAU": 43.47088646581027,
+      "e": 0.1463654410358884,
+      "iDeg": 25.71803793119805,
+      "qAU": 37.10825099602092,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "120178",
+      "name": "120178 (2003 OP32)",
+      "aAU": 43.12859304232437,
+      "e": 0.1038560198223817,
+      "iDeg": 27.17390840970643,
+      "qAU": 38.64942902840929,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "90568",
+      "name": "90568 Goibniu (2004 GV9)",
+      "aAU": 41.86051094353232,
+      "e": 0.07703121354853824,
+      "iDeg": 22.02878853371159,
+      "qAU": 38.63594498579016,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "84922",
+      "name": "84922 (2003 VS2)",
+      "aAU": 39.69213032038009,
+      "e": 0.08075019712867965,
+      "iDeg": 14.75902145149102,
+      "qAU": 36.48698297255215,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "120347",
+      "name": "120347 Salacia (2004 SB60)",
+      "aAU": 42.05521225409177,
+      "e": 0.1046039838127425,
+      "iDeg": 23.92719899399624,
+      "qAU": 37.6560695122233,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "145453",
+      "name": "145453 (2005 RR43)",
+      "aAU": 43.47406741180404,
+      "e": 0.1399092836503716,
+      "iDeg": 28.44638313669937,
+      "qAU": 37.39164178285058,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "523671",
+      "name": "523671 (2013 FZ27)",
+      "aAU": 48.18057739590921,
+      "e": 0.2144395690383873,
+      "iDeg": 14.01914359452698,
+      "qAU": 37.84875514310978,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 2
+    },
+    {
+      "pdes": "455502",
+      "name": "455502 (2003 UZ413)",
+      "aAU": 39.38439673042706,
+      "e": 0.2186570955808984,
+      "iDeg": 12.03548568061145,
+      "qAU": 30.77271893014605,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 1
+    },
+    {
+      "pdes": "120348",
+      "name": "120348 (2004 TY364)",
+      "aAU": 39.04644488506518,
+      "e": 0.06780142203011152,
+      "iDeg": 24.83131724494165,
+      "qAU": 36.39904039663738,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 0
+    },
+    {
+      "pdes": "15760",
+      "name": "15760 Albion (1992 QB1)",
+      "aAU": 44.13128015101105,
+      "e": 0.07115576064918994,
+      "iDeg": 2.187986421529304,
+      "qAU": 40.99108534344336,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 3
+    },
+    {
+      "pdes": "486958",
+      "name": "486958 Arrokoth (2014 MU69)",
+      "aAU": 44.05257835991367,
+      "e": 0.03555717645015258,
+      "iDeg": 2.450613924655929,
+      "qAU": 42.48619305808604,
+      "catalogueEpochJD": 2461200.5,
+      "conditionCode": 4
+    }
+  ],
+  "validation": {
+    "method": "Cubic Hermite interpolant evaluated at every quarter, midpoint and three-quarter point of every 90-day interval against withheld Horizons vectors. The stored nodes are not validation points.",
+    "samples": 116928,
+    "maxKm": 53.203857315142194,
+    "medianKm": 19.957246235468354,
+    "p95Km": 44.43258655475268,
+    "note": "Measured interpolation differences relative to the source, not absolute orbital uncertainty or a guaranteed continuous-time error bound. Dates are TDB. Float32 display rounding is additional."
+  }
+}

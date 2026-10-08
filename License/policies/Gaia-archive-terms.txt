@@ -1,0 +1,585 @@
+Official-source text snapshot; retrieved 2026-09-30.
+URL: https://www.cosmos.esa.int/web/esdc/terms-and-conditions
+Final URL: https://www.cosmos.esa.int/web/esdc/terms-and-conditions
+HTML navigation/scripts/styles removed; this is not a new license grant.
+
+COSMOS Terms and Conditions - ESDC - Cosmos
+Terms and Conditions - ESDC
+Terms and Conditions
+If you access, download, or use data from the ESA Space Science Archives, the following terms and conditions apply:
+Terms and conditions for the use of data
+Terms and conditions for service
+Terms and Conditions for the use of data in the ESA Space Science Archives
+Data hosted in the ESA Space Science Archives are distributed under the
+CC BY-NC 3.0 IGO
+licence. Access to, and use of, these data constitute acceptance by you (hereinafter the User) of the following Terms and Conditions:
+Raw and Calibrated Data (hereafter Data) deriving from satellites flown in the framework of an Agency Programme and contained in the ESA Space Science Archives, as well as analysed data and higher-level science products (hereafter Data Products) contained in the ESA Space Science Archives, are open and free to use by the User subject to proper acknowledgment to be given in accordance with the
+credit lines provided below.
+Prior to any commercial use by the User of any Data or Data Product, including any use or application that directly or indirectly generates a financial gain, a detailed request for authorisation/licence shall be made by the User by sending email to
+data.licences@esa.int
+.
+The User shall not use Data or Data Products to state or imply the endorsement by ESA or by any ESA employee of a commercial product, service, or activity, or used in any misleading manner.
+ESA does not provide any warranties to the User with respect to the accuracy of information contained in Data and/or Data Products nor that such Data or Data Product are suitable for the required use.
+ESA does not indemnify, hold harmless, nor release the User of any Data or Data Products from copyright infringement, nor grant exclusive rights to use with respect to Data or Data Products.
+ESA assumes no liability in respect of the use of Data and Data Products, contained in the ESA Science Archives and shall be held harmless for any and all direct and indirect alleged damages deriving from access to or use of such Data and Data Products.
+Without any prejudice to the
+ESA Convention
+, especially its Annex I on Privileges and Immunities, these Terms and Conditions shall be governed and interpreted in accordance with the laws of France. Any dispute arising out of, or in connection with these Terms and Conditions that cannot be settled amicably within thirty days from the notification of the dispute by one party to the other shall be finally settled under the Rules of Arbitration of the International Chamber of Commerce by an arbitrator appointed in accordance with the said Rules. The language of arbitration shall be English. The place of arbitration shall be Paris, France.
+The Terms and Conditions for the use of data in the ESA Space Science Archives require users to acknowledge ESA and other providers of the data by means of mission-specific credit lines as indicated below. The acronym PI corresponds to Principal Investigator.
+Mission
+Instrument
+Credit Line
+Astronomy
+CHEOPS
+All
+Credit: ESA, Name of Proposal PI
+COS-B
+Credit: ESA
+Einstein Probe
+All
+Credit: CAS, ESA, MPE, CNES
+EXOSAT
+All
+Credit: ESA, Name of Proposal PI
+Gaia
+All
+Credit: ESA, Gaia DPAC
+Hipparcos
+Credit: ESA
+Euclid
+All
+Credit: ESA Euclid, Euclid Consortium, NASA
+Herschel
+All
+Credit: ESA, Name of Proposal PI
+HST
+All
+Credit: NASA, ESA, Name of Proposal PI
+INTEGRAL
+All
+Credit: ESA, Name of Proposal PI
+ISO
+All
+Credit: ESA, Name of Proposal PI
+JWST
+All
+Credit: NASA, ESA, CSA, Name of Proposal PI
+Lisa Pathfinder
+All
+Credit: ESA, S. Vitale
+Planck
+All
+Credit: ESA, Planck Collaboration
+XMM-Newton
+All
+Credit: ESA, Name of Proposal PI
+Planetary Science
+BepiColombo
+BELA
+Credit: ESA, JAXA, N. Thomas
+BepiColombo
+ISA
+Credit: ESA, JAXA, V. Iafolla
+BepiColombo
+MDM
+Credit: ESA, JAXA, M. Kobayashi
+BepiColombo
+MERTIS
+Credit: ESA, JAXA, H. Hiesinger
+BepiColombo
+MGNS
+Credit: ESA, JAXA, I. Mitrofanov
+BepiColombo
+MIXS
+Credit: ESA, JAXA, E. Bounce
+BepiColombo
+MMO-MFG
+Credit: ESA, JAXA, W. Baumjohann
+BepiColombo
+MORE
+Credit: ESA, JAXA, L. Iess
+BepiColombo
+MPO-MAG
+Credit: ESA, JAXA, D. Heyner
+BepiColombo
+MPPE
+Credit: ESA, JAXA, Y. Saito
+BepiColombo
+MSASI
+Credit: ESA, JAXA, I. Yoshikawa
+BepiColombo
+PHEBUS
+Credit: ESA, JAXA, E. Quemerais
+BepiColombo
+PWI
+Credit: ESA, JAXA, Y. Kasaba
+BepiColombo
+SERENA
+Credit: ESA, JAXA, S. Orsini
+BepiColombo
+SIMBIO-SYS
+Credit: ESA, JAXA, G. Cremonese
+BepiColombo
+SIXS
+Credit: ESA, JAXA, J. Huovelin
+Chandrayaan-1
+C1XS
+Credit: ISRO, ESA, M. Grande
+Chandrayaan-1
+SARA
+Credit: ISRO, ESA, S. Barabash
+Chandrayaan-1
+SIR-2
+Credit: ISRO, ESA, U. Mall
+ExoMars TGO
+NOMAD
+Credit: ESA, Roscosmos, A. Vandaele
+ExoMars TGO
+ACS
+Credit: ESA, Roscosmos, O. Korablev
+ExoMars TGO
+CaSSIS
+Credit: ESA, Roscosmos, N. Thomas
+ExoMars TGO
+FREND
+Credit: ESA, Roscosmos, I. Mitrofanov
+Giotto
+DID
+Credit: ESA, J. McDonnell
+Giotto
+EPA
+Credit: ESA, S. McKenna-Lawlor
+Giotto
+HMC
+Credit: ESA, H. Keller
+Giotto
+IMS
+Credit: ESA, H. Balsiger
+Giotto
+JPA
+Credit: ESA, A. Johnstone
+Giotto
+MAG
+Credit: ESA, F. Neubauer
+Giotto
+NMS
+Credit: ESA, D. Krankowsky
+Giotto
+OPE
+Credit: ESA, A. Lavasseur-Regourd
+Giotto
+PIA
+Credit: ESA, J. Kissel
+Giotto
+RPA
+Credit: ESA, H. Reme
+Huygens
+ACP
+Credit: ESA, NASA, ASI, G. Israel
+Huygens
+DISR
+Credit: ESA, NASA, ASI, M. Tomasko
+Huygens
+DWE
+Credit: ESA, NASA, ASI, M. Bird
+Huygens
+CGMS
+Credit: ESA, NASA, ASI, H. Niemann
+Huygens
+HASI
+Credit: ESA, NASA, ASI, M. Fulchignoni
+Huygens
+SSP
+Credit: ESA, NASA, ASI, J. Zarnecki
+Juice
+3GM
+Credit: ESA, NASA, JAXA, L. Iess
+Juice
+GALA
+Credit: ESA, NASA, JAXA, H. Hussmann
+Juice
+J-MAG
+Credit: ESA, NASA, JAXA, M. Dougherty
+Juice
+JANUS
+Credit: ESA, NASA, JAXA, P. Palumbo
+Juice
+MAJIS
+Credit: ESA, NASA, JAXA, F. Poulet
+Juice
+PEP
+Credit: ESA, NASA, JAXA, S. Barabash
+Juice
+PRIDE
+Credit: ESA, NASA, JAXA, L. Gurvits
+Juice
+RIME
+Credit: ESA, NASA, JAXA, L. Bruzzone
+Juice
+RPWI
+Credit: ESA, NASA, JAXA, J. Wahlund
+Juice
+SWI
+Credit: ESA, NASA, JAXA, P. Hartog
+Juice
+UVS
+Credit: ESA, NASA, JAXA, R. Gladstone
+Mars Express
+ASPERA
+Credit:
+ESA, M. Holmström
+Mars Express
+HRSC
+Credit: ESA, T. Roatsch
+Mars Express
+MaRS
+Credit:
+ESA, M. Plätzold
+Mars Express
+MARSIS
+Credit: ESA, R. Orosei
+Mars Express
+OMEGA
+Credit: ESA, J. Carter
+Mars Express
+PFS
+Credit: ESA, M. Giuranna
+Mars Express
+SPICAM
+Credit: ESA, F. Montmessin
+Mars Express
+VMC
+Credit: ESA, A. Sanchez-Lavega
+Proba-2
+LYRA
+Credit: ESA, M. Dominique
+Proba-2
+DSLP
+Credit: ESA, P. Tavenicek
+Proba-2
+SWAP
+Credit: ESA, D. Berghmans
+Proba-2
+TPMU
+Credit: ESA, F. Hruska
+Rosetta
+Alice
+Credit: ESA, J. Parker
+Rosetta
+APXS
+Credit:
+ESA, G. Klingelhöfer
+Rosetta
+CIVA
+Credit: ESA, J. Bibring
+Rosetta
+CONSERT
+Credit: ESA, A. Henrique
+Rosetta
+COSAC
+Credit: ESA, F. Goesmann
+Rosetta
+COSIMA
+Credit: ESA, M. Hilchenbach
+Rosetta
+GIADA
+Credit: ESA, A. Rotundi
+Rosetta
+MIDAS
+Credit: ESA, T. Mannel
+Rosetta
+MIRO
+Credit: ESA, M. Hofstadter
+Rosetta
+MUPUS
+Credit: ESA, T. Spohn
+Rosetta
+OSIRIS
+Credit: ESA, H. Sierks
+Rosetta
+PTOLEMY
+Credit: ESA, I. Wright
+Rosetta
+ROLIS
+Credit: ESA, S. Mottola
+Rosetta
+ROMAP
+Credit: ESA, H. Auster
+Rosetta
+ROSINA
+Credit: ESA, K. Altwegg
+Rosetta
+RPC/ICA
+Credit: ESA, H. Nilsson
+Rosetta
+RPC/IES
+Credit: ESA, J. Burch
+Rosetta
+RPC/LAP
+Credit: ESA, A. Eriksson
+Rosetta
+RPC/MAG
+Credit: ESA, K. Glassmeier
+Rosetta
+RPC/MIU
+Credit: ESA, P. Henri
+Rosetta
+RPC/PIU
+Credit: ESA, C. Carr
+Rosetta
+RSI
+Credit:
+ESA, M. Plätzold
+Rosetta
+SD2
+Credit: ESA, A. Ercoli-Finzi
+Rosetta
+SESAME/CASSE
+Credit: ESA, M. Knapmeyer
+Rosetta
+SESAME/DIM
+Credit:
+ESA, H. Krüger
+Rosetta
+SESAME/PP
+Credit: ESA, W. Schmidt
+Rosetta
+VIRTIS
+Credit: ESA, F. Capaccioni
+SMART-1
+AMIE
+Credit: ESA, J. Josset
+SMART-1
+D-CIXS
+Credit: ESA, M. Grande
+SMART-1
+EPDP
+Credit: ESA, G. Noci
+SMART-1
+KaTE
+Credit: ESA, D. Heuer
+SMART-1
+Laser Link
+Credit: ESA, Z. Sodnik
+SMART-1
+OBAN
+Credit: ESA, F. Ankersen
+SMART-1
+RSIS
+Credit: ESA, L. Iess, G. Palmerini
+SMART-1
+SID
+Credit: ESA, U. Keller
+SMART-1
+SPEDE
+Credit: ESA, A. Malkki
+SMART-1
+XSM
+Credit: ESA, J. Huovelin
+Venus Express
+ASPERA
+Credit: ESA, S. Barabash
+Venus Express
+MAG
+Credit: ESA, T. Zhang
+Venus Express
+PFS
+Credit: ESA, V. Formisano
+Venus Express
+SPICAV
+Credit: ESA, J. Bertaux
+Venus Express
+VeRa
+Credit:
+ESA, B. Häusler
+Venus Express
+VIRTIS
+Credit: ESA, P. Drossart, G. Piccioni
+Venus Express
+VMC
+Credit: ESA, W. Markiewicz
+Heliophysics
+Cluster
+ASPOC
+Credit: ESA, K. Torkar
+Cluster
+CIS
+Credit: ESA, I. Dandouras
+Cluster
+DWP
+Credit: ESA, M. Balikhin
+Cluster
+EDI
+Credit: ESA, R. Torbert
+Cluster
+EFW
+Credit: ESA, M. Andre
+Cluster
+FGM
+Credit: ESA, C. Carr
+Cluster
+PEACE
+Credit: ESA, A. Fazakerley
+Cluster
+RAPID
+Credit: ESA, P. Daly
+Cluster
+STAFF
+Credit: ESA, P. Canu
+Cluster
+WDB
+Credit: ESA, J. Pickett
+Cluster
+WHISPER
+Credit: ESA, J. Rauch
+Double Star
+ASPOC
+Credit: ESA, CNSA, K. Torkar
+Double Star
+DWP
+Credit: ESA, CNSA, N. Cornilleau-Wehrlin, H. Alleyne
+Double Star
+FGM
+Credit: ESA, CNSA, C. Carr
+Double Star
+HEED
+Credit: ESA, CNSA, W. Zhang, J.B. Cao
+Double Star
+HEPD
+Credit: ESA, CNSA, J. Liang, J.B. Cao
+Double Star
+HIA
+Credit: ESA, CNSA, H. Reme
+Double Star
+HID
+Credit: ESA, CNSA, Y. Zhai, J.B. Cao
+Double Star
+LEID
+Credit: ESA, CNSA, Q. Ren, J.B. Cao
+Double Star
+LFEW
+Credit: ESA, CNSA, Z. Wang, J.B. Cao
+Double Star
+NUADU
+Credit: ESA, CNSA, S. McKenna-Lawlor
+Double Star
+PEACE
+Credit: ESA, CNSA, A. Fazakerley
+Double Star
+STAFF
+Credit: ESA, CNSA, N. Cornilleau-Wehrlin, H. Alleyne
+SOHO
+CDS
+Credit: ESA, NASA, R. Harrison
+SOHO
+CELIAS
+Credit: ESA, NASA, D. Hovestadt
+SOHO
+COSTEP
+Credit: ESA, NASA, H. Kunow
+SOHO
+EIT
+Credit: ESA, NASA, J. Delaboudiniere
+SOHO
+ERNE
+Credit: ESA, NASA, J. Torsti
+SOHO
+GOLF
+Credit: ESA, NASA, A. Gabriel
+SOHO
+LASCO
+Credit: ESA, NASA, G. Brueckner
+SOHO
+SOI/MDI
+Credit: ESA, NASA, P. Sherrer
+SOHO
+SUMER
+Credit: ESA, NASA, K. Wilhelm
+SOHO
+SWAN
+Credit: ESA, NASA, J. Bertaux
+SOHO
+UVCS
+Credit: ESA, NASA, J. Kohl
+SOHO
+VIRGO
+Credit:
+ESA, NASA, C. Fröhlich
+Solar Orbiter
+EPD
+Credit: ESA, NASA, J. Rodriguez-Pacheco
+Solar Orbiter
+EUI
+Credit: ESA, NASA, D. Berghmans
+Solar Orbiter
+MAG
+Credit: ESA, NASA, T. Horbury
+Solar Orbiter
+Metis
+Credit: ESA, NASA, M. Romoli
+Solar Orbiter
+PHI
+Credit: ESA, NASA, S. Solanki
+Solar Orbiter
+RPW
+Credit: ESA, NASA, M. Maksimovic
+Solar Orbiter
+SoloHI
+Credit: ESA, NASA, R. Colaninno
+Solar Orbiter
+SPICE
+Credit: ESA, NASA, F. Auchere
+Solar Orbiter
+STIX
+Credit: ESA, NASA, S. Krucker
+Solar Orbiter
+SWA
+Credit: ESA, NASA, C. Owen
+Ulysses
+COSPIN
+Credit: ESA, NASA, R. McKibben
+Ulysses
+DUST
+Credit:
+ESA, NASA, H. Krüger
+Ulysses
+EPAC/GAS
+Credit: ESA, NASA, N. Krupp
+Ulysses
+GRB
+Credit: ESA, NASA, K. Hurley
+Ulysses
+GWE
+Credit: ESA, NASA, B. Bertotti
+Ulysses
+HI-SCALE
+Credit: ESA, NASA, L. Lanzerotti
+Ulysses
+SCE
+Credit: ESA, NASA, M. Bird
+Ulysses
+SWICS
+Credit: ESA, NASA, J. Geiss
+Ulysses
+SWOOPS
+Credit: ESA, NASA, D. McComas
+Ulysses
+URAP
+Credit: ESA, NASA, R. MacDowall
+Ulysses
+VHM/FGM
+Credit: ESA, NASA, A. Balogh
+Terms and Conditions of service for the ESA Space Science Archives
+The ESA Science Archives and associated services are delivered and maintained with high standards of quality, but without formal guarantees of uninterrupted availability, performance, or support. While we strive to ensure reliable access, service interruptions may occur due to maintenance, upgrades, or unforeseen issues. These services are intended for scientific research and educational use and are not designed to support operational dependencies. ESA accepts no liability for any loss or disruption resulting from the use of these services.
+Sanitized for DXP 7.3
+Removed a total of (1) style text-align:justify;
+Hidden
+My account
+placeholder
+PeopleEditorPersonalDetails
+portlet
+Close
+ESA uses cookies to track visits to our website only, no personal information is collected.
+        By continuing to use the site you are agreeing to our use of cookies.
+OK
+Find out more about our cookie policy.

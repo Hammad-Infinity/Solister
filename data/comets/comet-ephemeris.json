@@ -1,0 +1,514 @@
+{
+  "format": "comet-states-v2-adaptive-f64le",
+  "retrieved": "2026-09-30",
+  "frame": "Heliocentric geometric ICRF, ecliptic J2000",
+  "units": "AU and AU/day; TDB Julian dates",
+  "coverageUTC": [
+    "1800-01-03",
+    "2199-12-29"
+  ],
+  "tableStart": "1800-01-01 TDB",
+  "tableEnd": "2200-01-01 TDB",
+  "interpolation": "Variable-step cubic Hermite; row = JD TDB,x,y,z,vx,vy,vz",
+  "accuracyNote": "Long-range numerical predictions from the listed solution. Not historical or future observational accuracy. Interpolation/compression errors do not bound orbital uncertainty.",
+  "bytes": 10395392,
+  "sha256": "e68bb16504466d9b0ce4a180fd404d6c2634651694818ee86b3dfd0b2998cb77",
+  "entries": [
+    {
+      "key": "comet67p",
+      "designation": "67P",
+      "name": "67P/Churyumov\u2013Gerasimenko",
+      "radiusKm": 1.7,
+      "periodDays": 2353.0760679036616,
+      "offset": 0,
+      "count": 33395,
+      "startJD": 2378496.5,
+      "solution": "JPL#K284/1",
+      "dataArc": "2008-06-01 to 2025-06-21",
+      "sourceHeader": "API VERSION: 1.2\nAPI SOURCE: NASA/JPL Horizons API\n\n*******************************************************************************\nJPL/HORIZONS              67P/Churyumov-Gerasimenko        2026-Sep-30 01:34:56\nRec #:90000703 (+COV) Soln.date: 2026-Sep-04_10:25:07   # obs: 8610 (2008-2025)\n \nIAU76/J2000 helio. ecliptic osc. elements (au, days, deg., period=Julian yrs):\n \n  EPOCH=  2457305.5 ! 2015-Oct-10.0000000 (TDB)    RMSW= n.a.\n   EC= .6409081308996354   QR= 1.243265640702404   TP= 2457247.5886578122\n   OM= 50.13557377155012   W= 12.79824970228189    IN= 7.040294937543767\n   A= 3.462249490129549    MA= 8.859927425222466   ADIST= 5.681233339556694\n   PER= 6.44237116469175   N= .152991229           ANGMOM= .024570022\n   DAN= 1.25545            DDN= 5.44002            L= 62.8404706\n   B= 1.5558267            MOID= .25693199         TP= 2015-Aug-13.0886578122\n \nComet physical (GM= km^3/s^2; RAD= km):\n   GM= 6.622E-7            RAD= 1.7\n   M1=  12.9     M2=  n.a.     k1=  7.5    k2= n.a.     PHCOF= n.a.\nComet non-gravitational force model (AMRAT=m^2/kg;A1-A3=au/d^2;DT=days;R0=au):\n   AMRAT=  0.                                      DT=  45.66665\n   A1= 1.042562574148E-9   A2= -6.733588408679E-11 A3= 2.960397861898E-10\n Non-standard or simulated/proxy model:\n   ALN=  .1112620426   NK=  4.6142   NM=  2.15     NN=  5.093    R0=  2.808\n\nCOMET comments \n1: soln ref.= JPL#K284/1, data arc: 2008-06-01 to 2025-06-21\n2: k1=7.5;\n*******************************************************************************\n\n\n*******************************************************************************",
+      "radiusSource": "Horizons physical RAD field; approximate reference radius, not measured shape mesh",
+      "endJD": 2524593.5,
+      "referenceStepHours": 24,
+      "referenceRowCount": 146098,
+      "compressionToleranceKm": 0.2,
+      "maxCompressionErrorKm": 0.1999810000336863,
+      "requests": [
+        {
+          "startYear": 1800,
+          "endYear": 1850,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%271800-01-01%27&STOP_TIME=%271850-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "382c80f5738e3248ffcf8bb2f007e03ed2ef8bfe217cbb707ce95b6150139a0a",
+          "referenceRows": 18263,
+          "keptRows": 3214,
+          "maxCompressionErrorKm": 0.19976516461909577
+        },
+        {
+          "startYear": 1850,
+          "endYear": 1900,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%271850-01-01%27&STOP_TIME=%271900-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "b9ef82d1ca41faaa5a050f284c82dbd13e2fd9dd9e55ef96b1363f30cb45a9db",
+          "referenceRows": 18263,
+          "keptRows": 2978,
+          "maxCompressionErrorKm": 0.19963425381430144
+        },
+        {
+          "startYear": 1900,
+          "endYear": 1950,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%271900-01-01%27&STOP_TIME=%271950-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "cefe249c82dc48344b0aa52470a2a4c1e6d88e953c60817d209eb798b442568f",
+          "referenceRows": 18263,
+          "keptRows": 3132,
+          "maxCompressionErrorKm": 0.19979285425834808
+        },
+        {
+          "startYear": 1950,
+          "endYear": 2000,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%271950-01-01%27&STOP_TIME=%272000-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "893492c0fd09062de98f4c6c1e11d53328e53d98869f1f7a838d08f01533ef84",
+          "referenceRows": 18263,
+          "keptRows": 4643,
+          "maxCompressionErrorKm": 0.19991657417282468
+        },
+        {
+          "startYear": 2000,
+          "endYear": 2050,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%272000-01-01%27&STOP_TIME=%272050-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "19621658dc1e4957b556fc80ad00d0381087ac9d7c95bb47fdb8494adb29276f",
+          "referenceRows": 18264,
+          "keptRows": 5113,
+          "maxCompressionErrorKm": 0.19930048554559904
+        },
+        {
+          "startYear": 2050,
+          "endYear": 2100,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%272050-01-01%27&STOP_TIME=%272100-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "3d8528325471afc8199902d8f447d1577c7e123d601aec4c830add05803bf9e1",
+          "referenceRows": 18263,
+          "keptRows": 4753,
+          "maxCompressionErrorKm": 0.19995819858887923
+        },
+        {
+          "startYear": 2100,
+          "endYear": 2150,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%272100-01-01%27&STOP_TIME=%272150-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "4a60692f40a17755cc47287dd15928e2f9970a79982291b87bdd9885459574ff",
+          "referenceRows": 18263,
+          "keptRows": 4859,
+          "maxCompressionErrorKm": 0.1999810000336863
+        },
+        {
+          "startYear": 2150,
+          "endYear": 2200,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D67P%3BCAP%3BNOFRAG%27&START_TIME=%272150-01-01%27&STOP_TIME=%272200-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "156b67b99939d04a0732aae638e072ca62be2cc461eb1afe3da4b299f474d543",
+          "referenceRows": 18263,
+          "keptRows": 4703,
+          "maxCompressionErrorKm": 0.19983230789327983
+        }
+      ],
+      "boundaryDisagreementKm": [
+        0.0168891209929342,
+        0.16001081033550163,
+        0.019379510555620306,
+        0.1841898633381529,
+        0.009261879919062795,
+        0.0,
+        0.0
+      ],
+      "validationCount": 134,
+      "validationMaxKm": 1.3633983555544436
+    },
+    {
+      "key": "comet2p",
+      "designation": "2P",
+      "name": "2P/Encke",
+      "radiusKm": 2.4,
+      "periodDays": 1207.34546567165,
+      "offset": 233765,
+      "count": 78948,
+      "startJD": 2378496.5,
+      "solution": "JPL#K273/18",
+      "dataArc": "2018-11-05 to 2026-09-25",
+      "sourceHeader": "API VERSION: 1.2\nAPI SOURCE: NASA/JPL Horizons API\n\n*******************************************************************************\nJPL/HORIZONS                      2P/Encke                 2026-Sep-30 01:34:57\nRec #:90000091 (+COV) Soln.date: 2026-Sep-28_16:21:59    # obs: 850 (2018-2026)\n \nIAU76/J2000 helio. ecliptic osc. elements (au, days, deg., period=Julian yrs):\n \n  EPOCH=  2460119.5 ! 2023-Jun-24.0000000 (TDB)    RMSW= n.a.\n   EC= .8469705404035429   QR= .3395708983777434   TP= 2460240.0237192628\n   OM= 334.0291151748801   W= 187.2774169545077    IN= 11.33808331321223\n   A= 2.218990377886723    MA= 324.0628633904897   ADIST= 4.098409857395704\n   PER= 3.3055317335295    N= .298174806           ANGMOM= .013623122\n   DAN= 3.92348            DDN= .34083             L= 161.1659864\n   B= -1.4270286           MOID= .165966           TP= 2023-Oct-22.5237192628\n \nComet physical (GM= km^3/s^2; RAD= km):\n   GM= n.a.                RAD= 2.4\n   M1=  15.7     M2=  n.a.     k1=  4.5    k2= n.a.     PHCOF= n.a.\nComet non-gravitational force model (AMRAT=m^2/kg;A1-A3=au/d^2;DT=days;R0=au):\n   AMRAT=  0.                                      DT=  0.\n   A1= 2.10372377187E-10   A2= 2.563488669693E-12  A3= 0.\n Non-standard or simulated/proxy model:\n   ALN=  .1112620426   NK=  4.6142   NM=  2.15     NN=  5.093    R0=  2.808\n\nCOMET comments \n1: soln ref.= JPL#K273/18, data arc: 2018-11-05 to 2026-09-25\n2: k1=4.5;\n*******************************************************************************\n\n  \n\n*******************************************************************************",
+      "radiusSource": "Horizons physical RAD field; approximate reference radius, not measured shape mesh",
+      "endJD": 2524593.5,
+      "referenceStepHours": 6,
+      "referenceRowCount": 584389,
+      "compressionToleranceKm": 0.2,
+      "maxCompressionErrorKm": 0.1999978710996166,
+      "requests": [
+        {
+          "startYear": 1800,
+          "endYear": 1825,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271800-01-01%27&STOP_TIME=%271825-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "47ed07ce7026e3bd49805a98cc17d9d2a853f51ae67c31a34e90430ded43a469",
+          "referenceRows": 36525,
+          "keptRows": 4725,
+          "maxCompressionErrorKm": 0.19992604796528765
+        },
+        {
+          "startYear": 1825,
+          "endYear": 1850,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271825-01-01%27&STOP_TIME=%271850-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "b6f8170ad60868dc0a8f3a66439483dd060252066bf92e9058fd464cef3a28da",
+          "referenceRows": 36525,
+          "keptRows": 5100,
+          "maxCompressionErrorKm": 0.1998741042509556
+        },
+        {
+          "startYear": 1850,
+          "endYear": 1875,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271850-01-01%27&STOP_TIME=%271875-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "5057a859840920c68e1a0e6c3bb89d868a12c278751c65c2e188411d68c6d311",
+          "referenceRows": 36525,
+          "keptRows": 4751,
+          "maxCompressionErrorKm": 0.1999827123245652
+        },
+        {
+          "startYear": 1875,
+          "endYear": 1900,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271875-01-01%27&STOP_TIME=%271900-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "8458ad7c0f04abe14c1c3f06bdc44ec7af6e35aafee71671482d279795f9b514",
+          "referenceRows": 36525,
+          "keptRows": 5035,
+          "maxCompressionErrorKm": 0.19996271070372906
+        },
+        {
+          "startYear": 1900,
+          "endYear": 1925,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271900-01-01%27&STOP_TIME=%271925-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "1d98c984a7da3889032d9ac563ead310e5598228ce2b14b72cacd9920848c1aa",
+          "referenceRows": 36525,
+          "keptRows": 5014,
+          "maxCompressionErrorKm": 0.19924734784411507
+        },
+        {
+          "startYear": 1925,
+          "endYear": 1950,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271925-01-01%27&STOP_TIME=%271950-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "02ee89703d90d0ed86f83d2a5ff263ba1ad81a56341cc4df3c3560c82eba7e8e",
+          "referenceRows": 36525,
+          "keptRows": 4815,
+          "maxCompressionErrorKm": 0.19972541508064412
+        },
+        {
+          "startYear": 1950,
+          "endYear": 1975,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271950-01-01%27&STOP_TIME=%271975-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "2644f5cb45cf320285dbe5f41a86920305038d5a86c76a700313a60d9abf96a5",
+          "referenceRows": 36525,
+          "keptRows": 5089,
+          "maxCompressionErrorKm": 0.1999978710996166
+        },
+        {
+          "startYear": 1975,
+          "endYear": 2000,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%271975-01-01%27&STOP_TIME=%272000-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "7e1689260e4851abe9fd11fc94ce3494b4a85d5ca05ad8cb3c77bd621824a4c3",
+          "referenceRows": 36525,
+          "keptRows": 4776,
+          "maxCompressionErrorKm": 0.19990824805915586
+        },
+        {
+          "startYear": 2000,
+          "endYear": 2025,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272000-01-01%27&STOP_TIME=%272025-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "c94eeead9134e97927505c3955211818f12998abf47183ce4169a042c7a5f932",
+          "referenceRows": 36529,
+          "keptRows": 5080,
+          "maxCompressionErrorKm": 0.1998919196406746
+        },
+        {
+          "startYear": 2025,
+          "endYear": 2050,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272025-01-01%27&STOP_TIME=%272050-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "19f73b0477801ab03c9c65925dff3afeceb99ff1f2deb34b46203703fb47ab1a",
+          "referenceRows": 36525,
+          "keptRows": 4767,
+          "maxCompressionErrorKm": 0.1998189479937742
+        },
+        {
+          "startYear": 2050,
+          "endYear": 2075,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272050-01-01%27&STOP_TIME=%272075-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "72276cc2771f8651e2745ca3067995211b73bb38f5e7bc124091fed47c20136f",
+          "referenceRows": 36525,
+          "keptRows": 5075,
+          "maxCompressionErrorKm": 0.19974716547564872
+        },
+        {
+          "startYear": 2075,
+          "endYear": 2100,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272075-01-01%27&STOP_TIME=%272100-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "47b2c45f03c26ad93118833d5d1c66e199aca18402b2202218ebf4c3d1c66a82",
+          "referenceRows": 36525,
+          "keptRows": 5026,
+          "maxCompressionErrorKm": 0.1999858752602846
+        },
+        {
+          "startYear": 2100,
+          "endYear": 2125,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272100-01-01%27&STOP_TIME=%272125-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "11b9cbb3317f6440760fa8b98bfd1146e14df6c142268f1bb0dd8f2adf3ed9a1",
+          "referenceRows": 36525,
+          "keptRows": 4751,
+          "maxCompressionErrorKm": 0.19992070166424605
+        },
+        {
+          "startYear": 2125,
+          "endYear": 2150,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272125-01-01%27&STOP_TIME=%272150-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "bfcac539a28a32335baf0c96ace80226d2655f0c0bb2d0ac0d50b8109bafeca8",
+          "referenceRows": 36525,
+          "keptRows": 5097,
+          "maxCompressionErrorKm": 0.199837759017341
+        },
+        {
+          "startYear": 2150,
+          "endYear": 2175,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272150-01-01%27&STOP_TIME=%272175-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "d92f8a3dcd61922ac609263ed85d52c5f23dad87ad026a588c377cbba253adb5",
+          "referenceRows": 36525,
+          "keptRows": 4770,
+          "maxCompressionErrorKm": 0.1998684761581098
+        },
+        {
+          "startYear": 2175,
+          "endYear": 2200,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D2P%3BCAP%3BNOFRAG%27&START_TIME=%272175-01-01%27&STOP_TIME=%272200-01-01%27&STEP_SIZE=%276+h%27",
+          "sha256": "f088c927ddf9bc99d8e57d5e0fe22c20b0daeba9ff49365cc59e33728b091c5a",
+          "referenceRows": 36525,
+          "keptRows": 5077,
+          "maxCompressionErrorKm": 0.19983683762557178
+        }
+      ],
+      "boundaryDisagreementKm": [
+        0.0494835691318353,
+        0.019028233017667078,
+        0.3449090064889425,
+        0.010988688106230925,
+        0.04598875122045692,
+        0.1206638080069651,
+        0.11552942189214853,
+        0.05818302201571378,
+        0.013335889920387277,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "validationCount": 134,
+      "validationMaxKm": 0.37299464693539996
+    },
+    {
+      "key": "comet46p",
+      "designation": "46P",
+      "name": "46P/Wirtanen",
+      "radiusKm": 0.6,
+      "periodDays": 1986.5389638180036,
+      "offset": 786401,
+      "count": 35955,
+      "startJD": 2378496.5,
+      "solution": "JPL#K243/4",
+      "dataArc": "2013-10-30 to 2023-12-10",
+      "sourceHeader": "API VERSION: 1.2\nAPI SOURCE: NASA/JPL Horizons API\n\n*******************************************************************************\nJPL/HORIZONS                    46P/Wirtanen               2026-Sep-30 01:34:58\nRec #:90000548 (+COV) Soln.date: 2024-Feb-21_09:51:41   # obs: 4224 (2013-2023)\n \nIAU76/J2000 helio. ecliptic osc. elements (au, days, deg., period=Julian yrs):\n \n  EPOCH=  2458465.5 ! 2018-Dec-13.0000000 (TDB)    RMSW= n.a.\n   EC= .6587550054889648   QR= 1.055355384474796   TP= 2458465.4311691285\n   OM= 82.15763392494087   W= 356.341071857073     IN= 11.7475487582537\n   A= 3.092661874753647    MA= .01247351005310328  ADIST= 5.129968365032498\n   PER= 5.43884726575771   N= .181219702           ANGMOM= .022759983\n   DAN= 1.05621            DDN= 5.10986            L= 78.57514329999999\n   B= -.744472             MOID= .071335           TP= 2018-Dec-12.9311691285\n \nComet physical (GM= km^3/s^2; RAD= km):\n   GM= n.a.                RAD= .600\n   M1=  16.6     M2=  n.a.     k1=  4.75   k2= n.a.     PHCOF= n.a.\nComet non-gravitational force model (AMRAT=m^2/kg;A1-A3=au/d^2;DT=days;R0=au):\n   AMRAT=  0.                                      DT=  -14.14793\n   A1= 4.096574485302E-9   A2= -1.246898174286E-9  A3= 6.905972212553E-10\n Non-standard or simulated/proxy model:\n   ALN=  .1112620426   NK=  4.6142   NM=  2.15     NN=  5.093    R0=  2.808\n\nCOMET comments \n1: soln ref.= JPL#K243/4, data arc: 2013-10-30 to 2023-12-10\n2: k1=4.75; radar( 0 delay, 1 Dop.);\n*******************************************************************************\n\n\n*******************************************************************************",
+      "radiusSource": "Horizons physical RAD field; approximate reference radius, not measured shape mesh",
+      "endJD": 2524593.5,
+      "referenceStepHours": 24,
+      "referenceRowCount": 146098,
+      "compressionToleranceKm": 0.2,
+      "maxCompressionErrorKm": 0.19999948502313714,
+      "requests": [
+        {
+          "startYear": 1800,
+          "endYear": 1850,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%271800-01-01%27&STOP_TIME=%271850-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "eed1b34a6da33925e99671bd3355c9b3e086a699698c38d649b3f3808f7259ca",
+          "referenceRows": 18263,
+          "keptRows": 4070,
+          "maxCompressionErrorKm": 0.1998670644490783
+        },
+        {
+          "startYear": 1850,
+          "endYear": 1900,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%271850-01-01%27&STOP_TIME=%271900-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "9914c6a7cb8a63e5105aebc2feb12c514db7adbf5b9bbb593eced8b946e3a9d4",
+          "referenceRows": 18263,
+          "keptRows": 4192,
+          "maxCompressionErrorKm": 0.1996941195287061
+        },
+        {
+          "startYear": 1900,
+          "endYear": 1950,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%271900-01-01%27&STOP_TIME=%271950-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "72625cefcf929ac83000a106ebdc514f5fd3a4156aaf7668ba29aed3bbf54476",
+          "referenceRows": 18263,
+          "keptRows": 4644,
+          "maxCompressionErrorKm": 0.1999660204182978
+        },
+        {
+          "startYear": 1950,
+          "endYear": 2000,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%271950-01-01%27&STOP_TIME=%272000-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "4feafdfe293049b6a9bc342e368d0b119fd267f64352a1ea63e4de0aab23e0ac",
+          "referenceRows": 18263,
+          "keptRows": 4989,
+          "maxCompressionErrorKm": 0.19998440740591947
+        },
+        {
+          "startYear": 2000,
+          "endYear": 2050,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%272000-01-01%27&STOP_TIME=%272050-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "fed8cb57d78b08f3cb70c711703e4f9ee0b1cd5d247b0733a5752c0aac9cfe75",
+          "referenceRows": 18264,
+          "keptRows": 5653,
+          "maxCompressionErrorKm": 0.19998793623664649
+        },
+        {
+          "startYear": 2050,
+          "endYear": 2100,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%272050-01-01%27&STOP_TIME=%272100-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "c57527e6fee3ee663fc76dfaed86a0e7be1bfb45cfaf3b5c279bcddda2f85fab",
+          "referenceRows": 18263,
+          "keptRows": 4183,
+          "maxCompressionErrorKm": 0.1996683487590331
+        },
+        {
+          "startYear": 2100,
+          "endYear": 2150,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%272100-01-01%27&STOP_TIME=%272150-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "d39df49ffb6cae4d194ca58c83b5b6287f82144adaf3cfa759a0add8b7fb69c9",
+          "referenceRows": 18263,
+          "keptRows": 4064,
+          "maxCompressionErrorKm": 0.1999861351135987
+        },
+        {
+          "startYear": 2150,
+          "endYear": 2200,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D46P%3BCAP%3BNOFRAG%27&START_TIME=%272150-01-01%27&STOP_TIME=%272200-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "e6bf930318f4fd13224ba8c1ec48cffe196b4fdeb5236223de0002ba5a0471cb",
+          "referenceRows": 18263,
+          "keptRows": 4160,
+          "maxCompressionErrorKm": 0.19999948502313714
+        }
+      ],
+      "boundaryDisagreementKm": [
+        0.009119762532370094,
+        0.05949645688189208,
+        0.041431811457051465,
+        0.03973901935804772,
+        0.018314002822366632,
+        0.0,
+        0.0
+      ],
+      "validationCount": 134,
+      "validationMaxKm": 0.46078852252052954
+    },
+    {
+      "key": "comet9p",
+      "designation": "9P",
+      "name": "9P/Tempel 1",
+      "radiusKm": 3.0,
+      "periodDays": 2038.2816804110332,
+      "offset": 1038086,
+      "count": 37334,
+      "startJD": 2378496.5,
+      "solution": "JPL#K284/2",
+      "dataArc": "2008-10-25 to 2025-12-22",
+      "sourceHeader": "API VERSION: 1.2\nAPI SOURCE: NASA/JPL Horizons API\n\n*******************************************************************************\nJPL/HORIZONS                     9P/Tempel 1               2026-Sep-30 01:34:59\nRec #:90000192 (+COV) Soln.date: 2025-Dec-29_09:30:51   # obs: 3283 (2008-2025)\n \nIAU76/J2000 helio. ecliptic osc. elements (au, days, deg., period=Julian yrs):\n \n  EPOCH=  2457470.5 ! 2016-Mar-23.0000000 (TDB)    RMSW= n.a.\n   EC= .5097028326964878   QR= 1.542540469975507   TP= 2457603.0707245683\n   OM= 68.75357468050096   W= 179.1972753698572    IN= 10.4734281543904\n   A= 3.146133758958915    MA= 336.5854438552903   ADIST= 4.749727047942323\n   PER= 5.58051110311029   N= .176619357           ANGMOM= .026250976\n   DAN= 4.74924            DDN= 1.54259            L= 247.9642223\n   B= .1459143             MOID= .52939701         TP= 2016-Aug-02.5707245683\n \nComet physical (GM= km^3/s^2; RAD= km):\n   GM= n.a.                RAD= 3.\n   M1=  12.9     M2=  n.a.     k1=  9.     k2= n.a.     PHCOF= n.a.\nComet non-gravitational force model (AMRAT=m^2/kg;A1-A3=au/d^2;DT=days;R0=au):\n   AMRAT=  0.                                      DT=  0.\n   A1= 1.800413476303E-11  A2= 1.179466606118E-11  A3= 0.\n Non-standard or simulated/proxy model:\n   ALN=  .1112620426   NK=  4.6142   NM=  2.15     NN=  5.093    R0=  2.808\n\nCOMET comments \n1: soln ref.= JPL#K284/2, data arc: 2008-10-25 to 2025-12-22\n2: k1=9.;\n*******************************************************************************\n\n\n*******************************************************************************",
+      "radiusSource": "Horizons physical RAD field; approximate reference radius, not measured shape mesh",
+      "endJD": 2524593.5,
+      "referenceStepHours": 24,
+      "referenceRowCount": 146098,
+      "compressionToleranceKm": 0.2,
+      "maxCompressionErrorKm": 0.19999609114795672,
+      "requests": [
+        {
+          "startYear": 1800,
+          "endYear": 1850,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%271800-01-01%27&STOP_TIME=%271850-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "58af81e4081af5c821eee064c8ba473722bc9722de5b4f3be7036ca84812503a",
+          "referenceRows": 18263,
+          "keptRows": 5178,
+          "maxCompressionErrorKm": 0.19961232025243153
+        },
+        {
+          "startYear": 1850,
+          "endYear": 1900,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%271850-01-01%27&STOP_TIME=%271900-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "5d874802f8e360a1fae3ab2ca4c481fba2059c63cd557168686e11aded9a6da7",
+          "referenceRows": 18263,
+          "keptRows": 4656,
+          "maxCompressionErrorKm": 0.1999166469847037
+        },
+        {
+          "startYear": 1900,
+          "endYear": 1950,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%271900-01-01%27&STOP_TIME=%271950-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "7ad6c416585b1bd5495920bf4279f272e7728e4f4828356c6db3e04eaa9992de",
+          "referenceRows": 18263,
+          "keptRows": 4086,
+          "maxCompressionErrorKm": 0.19999609114795672
+        },
+        {
+          "startYear": 1950,
+          "endYear": 2000,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%271950-01-01%27&STOP_TIME=%272000-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "af869a550b35da67c5efe82d8c767d0cdd49899ae4e9d7c2d7bdb33918c03dd0",
+          "referenceRows": 18263,
+          "keptRows": 4954,
+          "maxCompressionErrorKm": 0.19991708042055034
+        },
+        {
+          "startYear": 2000,
+          "endYear": 2050,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%272000-01-01%27&STOP_TIME=%272050-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "0c490824521ed54d5785356276590aa5cc61e327c948b6a40190a2d1d9c141be",
+          "referenceRows": 18264,
+          "keptRows": 4693,
+          "maxCompressionErrorKm": 0.19990708713128408
+        },
+        {
+          "startYear": 2050,
+          "endYear": 2100,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%272050-01-01%27&STOP_TIME=%272100-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "733251e2ba680daf78f4aa77d87768e6dc1603f84ebfcf4149ccf17661fd4f9a",
+          "referenceRows": 18263,
+          "keptRows": 4192,
+          "maxCompressionErrorKm": 0.19980742525306763
+        },
+        {
+          "startYear": 2100,
+          "endYear": 2150,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%272100-01-01%27&STOP_TIME=%272150-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "ebc8777149f5f2ea512b2f3eee3215ad092b591d40945e778046b80692a756ac",
+          "referenceRows": 18263,
+          "keptRows": 4579,
+          "maxCompressionErrorKm": 0.19997619988397292
+        },
+        {
+          "startYear": 2150,
+          "endYear": 2200,
+          "url": "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&MAKE_EPHEM=%27YES%27&EPHEM_TYPE=%27VECTORS%27&CENTER=%27500%4010%27&OUT_UNITS=%27AU-D%27&REF_PLANE=%27ECLIPTIC%27&REF_SYSTEM=%27ICRF%27&VEC_CORR=%27NONE%27&VEC_TABLE=%272%27&CSV_FORMAT=%27YES%27&TIME_TYPE=%27TDB%27&COMMAND=%27DES%3D9P%3BCAP%3BNOFRAG%27&START_TIME=%272150-01-01%27&STOP_TIME=%272200-01-01%27&STEP_SIZE=%2724+h%27",
+          "sha256": "774416351ec3dbcacc461c4057997ea2c0edb041714d791214881cd5d57c99a6",
+          "referenceRows": 18263,
+          "keptRows": 4996,
+          "maxCompressionErrorKm": 0.19948524675642673
+        }
+      ],
+      "boundaryDisagreementKm": [
+        0.15195440470002286,
+        0.2287849486843804,
+        0.06884523128545551,
+        0.12438187437288892,
+        0.0037145102897361885,
+        0.0,
+        0.0
+      ],
+      "validationCount": 134,
+      "validationMaxKm": 0.2959235473644049
+    }
+  ]
+}

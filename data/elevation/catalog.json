@@ -1,0 +1,451 @@
+{
+  "schemaVersion": 1,
+  "title": "Solister elevation and reference-shape catalog",
+  "generatedBy": "tools/build_elevation_catalog.py",
+  "projectionNote": "Stored maps use a 2:1 equirectangular grid. The app converts their texel locations to the IAU/NAIF body-fixed frame before vertex displacement.",
+  "sources": [
+    {
+      "name": "NAIF Generic Kernel PCK",
+      "url": "https://naif.jpl.nasa.gov/pub/naif/generic_kernels/pck/pck00011.tpc",
+      "role": "IAU body radii, reference ellipsoids, and orientation constants; text PCK pck00011.tpc (published 2022-12-27)."
+    },
+    {
+      "name": "NOAA ETOPO1",
+      "url": "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO1/data/ice_surface/grid_registered/binary/etopo1_ice_g_i2.zip",
+      "role": "Earth global ice-surface relief; 1 arc-minute native grid."
+    },
+    {
+      "name": "USGS MESSENGER Mercury Global DEM",
+      "url": "https://planetarymaps.usgs.gov/mosaic/Mercury_Messenger_USGS_DEM_Global_665m_v2.tif",
+      "role": "Mercury global topography; 64 px/degree native."
+    },
+    {
+      "name": "USGS Magellan Venus Global Topography",
+      "url": "https://planetarymaps.usgs.gov/mosaic/Venus_Magellan_Topography_Global_4641m_v02.tif",
+      "role": "Venus global topography; Magellan altimetry."
+    },
+    {
+      "name": "NASA LRO LOLA CGI Moon Kit",
+      "url": "https://svs.gsfc.nasa.gov/vis/a000000/a004700/a004720/ldem_4_uint.tif",
+      "role": "Moon global 4 px/degree displacement map."
+    },
+    {
+      "name": "PDS/USGS MGS MOLA MEGDR",
+      "url": "https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg004/megt90n000cb.img",
+      "role": "Mars global MOLA median topography; 4 px/degree, GMM3 (mgm1025) degree/order 50 areoid datum."
+    }
+  ],
+  "entries": {
+    "phobos": {
+      "name": "Phobos",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "deimos": {
+      "name": "Deimos",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "io": {
+      "name": "Io",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "europa": {
+      "name": "Europa",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "ganymede": {
+      "name": "Ganymede",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "callisto": {
+      "name": "Callisto",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "himalia": {
+      "name": "Himalia",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "mimas": {
+      "name": "Mimas",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "enceladus": {
+      "name": "Enceladus",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "tethys": {
+      "name": "Tethys",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "dione": {
+      "name": "Dione",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "rhea": {
+      "name": "Rhea",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "titan": {
+      "name": "Titan",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "hyperion": {
+      "name": "Hyperion",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "iapetus": {
+      "name": "Iapetus",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "phoebe": {
+      "name": "Phoebe",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "ariel": {
+      "name": "Ariel",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "umbriel": {
+      "name": "Umbriel",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "titania": {
+      "name": "Titania",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "oberon": {
+      "name": "Oberon",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "miranda": {
+      "name": "Miranda",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "triton": {
+      "name": "Triton",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "nereid": {
+      "name": "Nereid",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "charon": {
+      "name": "Charon",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "jupiter": {
+      "name": "Jupiter",
+      "status": "no-solid-surface",
+      "map": null,
+      "referenceShape": "Cloud-top reference ellipsoid from NAIF PCK pck00011.tpc; a land-elevation DEM is not applicable to this gas/ice giant.",
+      "elevationAvailable": false
+    },
+    "saturn": {
+      "name": "Saturn",
+      "status": "no-solid-surface",
+      "map": null,
+      "referenceShape": "Cloud-top reference ellipsoid from NAIF PCK pck00011.tpc; a land-elevation DEM is not applicable to this gas/ice giant.",
+      "elevationAvailable": false
+    },
+    "uranus": {
+      "name": "Uranus",
+      "status": "no-solid-surface",
+      "map": null,
+      "referenceShape": "Cloud-top reference ellipsoid from NAIF PCK pck00011.tpc; a land-elevation DEM is not applicable to this gas/ice giant.",
+      "elevationAvailable": false
+    },
+    "neptune": {
+      "name": "Neptune",
+      "status": "no-solid-surface",
+      "map": null,
+      "referenceShape": "Cloud-top reference ellipsoid from NAIF PCK pck00011.tpc; a land-elevation DEM is not applicable to this gas/ice giant.",
+      "elevationAvailable": false
+    },
+    "pluto": {
+      "name": "Pluto",
+      "status": "reference-shape-only",
+      "map": null,
+      "referenceShape": "NAIF PCK pck00011.tpc radii/shape model only; no global elevation grid is bundled.",
+      "elevationAvailable": false
+    },
+    "sun": {
+      "name": "Sun",
+      "status": "not-applicable",
+      "map": null,
+      "referenceShape": "Photosphere; terrestrial topographic elevation is not applicable.",
+      "elevationAvailable": false
+    },
+    "mercury": {
+      "name": "Mercury",
+      "status": "global-dem",
+      "map": "mercury.u16",
+      "source": "MESSENGER Global DEM, USGS Astrogeology, 665.243 m/pixel (64 px/degree)",
+      "sourceUrl": "https://planetarymaps.usgs.gov/mosaic/Mercury_Messenger_USGS_DEM_Global_665m_v2.tif",
+      "citation": "USGS Astrogeology Science Center, Mercury MESSENGER USGS DEM Global 665m v2.",
+      "sourceProjection": "Equirectangular; planetocentric latitude; positive-east longitude; global.",
+      "sourceVerticalDatum": "Heights scaled by 0.5 m per stored signed-int16 DN above a 2,439.4 km reference sphere.",
+      "referenceShape": "IAU/NAIF PCK pck00011.tpc ellipsoid (2,440.53 x 2,438.26 km); source-sphere elevations converted to radial offsets from that ellipsoid.",
+      "sourceElevationRangeM": [
+        -5382.0,
+        4497.0
+      ],
+      "sourceGrid": [
+        23040,
+        11520
+      ],
+      "sourceNoDataFillCells": 0,
+      "dataFile": "mercury.u16",
+      "grid": {
+        "width": 2048,
+        "height": 1024,
+        "projection": "equirectangular",
+        "longitude": "positive-east, 0\u2013360; texel centres",
+        "latitude": "planetocentric, south-to-north; texel centres",
+        "encoding": "little-endian unsigned 16-bit; linear normalization"
+      },
+      "runtimeElevationRangeM": [
+        -6003.688,
+        4299.475
+      ],
+      "encodingRangeM": [
+        -6003.688,
+        4299.475
+      ],
+      "runtimeEquatorialPixelKm": 7.487,
+      "fileBytes": 4194304,
+      "elevationAvailable": true
+    },
+    "venus": {
+      "name": "Venus",
+      "status": "global-dem-with-filled-gaps",
+      "map": "venus.u16",
+      "source": "Magellan global radar-altimetry topography, USGS Astrogeology, 4,641.0589 m/pixel (~22.8 px/degree).",
+      "sourceUrl": "https://planetarymaps.usgs.gov/mosaic/Venus_Magellan_Topography_Global_4641m_v02.tif",
+      "citation": "USGS Astrogeology Science Center, Venus Magellan Topography Global 4641m v02.",
+      "sourceProjection": "Simple cylindrical/equirectangular; global; signed int16 metres.",
+      "sourceVerticalDatum": "Source GeoTIFF uses a 6,051.0 km spherical datum; converted by -800 m to the 6,051.8 km IAU mean radius.",
+      "referenceShape": "IAU/NAIF PCK pck00011.tpc mean spherical radius 6,051.8 km.",
+      "sourceElevationRangeM": [
+        -2951.0,
+        11687.0
+      ],
+      "sourceGrid": [
+        8192,
+        4096
+      ],
+      "sourceNoDataFillCells": 170890,
+      "dataFile": "venus.u16",
+      "grid": {
+        "width": 2048,
+        "height": 1024,
+        "projection": "equirectangular",
+        "longitude": "positive-east, 0\u2013360; texel centres",
+        "latitude": "planetocentric, south-to-north; texel centres",
+        "encoding": "little-endian unsigned 16-bit; linear normalization"
+      },
+      "runtimeElevationRangeM": [
+        -3686.0,
+        10817.5
+      ],
+      "encodingRangeM": [
+        -3686.0,
+        10817.5
+      ],
+      "runtimeEquatorialPixelKm": 18.567,
+      "fileBytes": 4194304,
+      "elevationAvailable": true
+    },
+    "moon": {
+      "name": "Moon",
+      "status": "global-dem",
+      "map": "moon.u16",
+      "source": "NASA LRO LOLA CGI Moon Kit LDEM_4, 4 px/degree (~7.58 km/pixel at the equator).",
+      "sourceUrl": "https://svs.gsfc.nasa.gov/vis/a000000/a004700/a004720/ldem_4_uint.tif",
+      "citation": "NASA Goddard Scientific Visualization Studio, CGI Moon Kit (LOLA displacement map).",
+      "sourceProjection": "Simple cylindrical; planetocentric latitude; positive-east longitude; 0\u2013360 E.",
+      "sourceVerticalDatum": "Unsigned DN encodes radius = 1,727,400 m + 0.5 m*DN; subtracting the 1,737,400 m IAU reference radius gives elevation = (DN - 20,000)*0.5 m.",
+      "referenceShape": "LOLA/IAU spherical reference radius 1,737.4 km (NAIF PCK pck00011.tpc).",
+      "sourceElevationRangeM": [
+        -8878.5,
+        10504.0
+      ],
+      "sourceGrid": [
+        1440,
+        720
+      ],
+      "sourceNoDataFillCells": 0,
+      "dataFile": "moon.u16",
+      "grid": {
+        "width": 2048,
+        "height": 1024,
+        "projection": "equirectangular",
+        "longitude": "positive-east, 0\u2013360; texel centres",
+        "latitude": "planetocentric, south-to-north; texel centres",
+        "encoding": "little-endian unsigned 16-bit; linear normalization"
+      },
+      "runtimeElevationRangeM": [
+        -8585.177,
+        10356.555
+      ],
+      "encodingRangeM": [
+        -8585.177,
+        10356.555
+      ],
+      "runtimeEquatorialPixelKm": 5.33,
+      "fileBytes": 4194304,
+      "elevationAvailable": true
+    },
+    "mars": {
+      "name": "Mars",
+      "status": "global-dem",
+      "map": "mars.u16",
+      "source": "MGS MOLA MEGDR global median topography, PDS Geosciences Node MEGT90N000CB, 4 px/degree (0.25 degree).",
+      "sourceUrl": "https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg004/megt90n000cb.img",
+      "citation": "Smith et al. MOLA; USGS Astrogeology / PDS Geosciences Node MEGDR v1.0, product version 2.0.",
+      "sourceProjection": "Simple cylindrical; 1,440 x 720; planetocentric; positive-east 0\u2013360 E; cell centres.",
+      "sourceVerticalDatum": "Median topography above the GMM3 (mgm1025) degree/order 50 areoid; signed big-endian int16 metres. Cells without observations are interpolated in the supplied MEGDR product.",
+      "referenceShape": "NAIF PCK pck00011.tpc IAU ellipsoid (3,396.19 x 3,376.20 km). Areoid-to-ellipsoid undulation is not applied; source heights are radial offsets.",
+      "sourceElevationRangeM": [
+        -8068,
+        21134
+      ],
+      "sourceGrid": [
+        1440,
+        720
+      ],
+      "sourceNoDataFillCells": 0,
+      "pdsLabelBytes": 4796,
+      "dataFile": "mars.u16",
+      "grid": {
+        "width": 2048,
+        "height": 1024,
+        "projection": "equirectangular",
+        "longitude": "positive-east, 0\u2013360; texel centres",
+        "latitude": "planetocentric, south-to-north; texel centres",
+        "encoding": "little-endian unsigned 16-bit; linear normalization"
+      },
+      "runtimeElevationRangeM": [
+        -7941.628,
+        21083.641
+      ],
+      "encodingRangeM": [
+        -7941.628,
+        21083.641
+      ],
+      "runtimeEquatorialPixelKm": 10.419,
+      "fileBytes": 4194304,
+      "elevationAvailable": true
+    },
+    "earth": {
+      "name": "Earth",
+      "status": "global-dem",
+      "map": "earth.u16",
+      "source": "NOAA ETOPO1 Ice Surface global relief model, 1 arc-minute native grid (21601 x 10801).",
+      "sourceUrl": "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO1/data/ice_surface/grid_registered/binary/etopo1_ice_g_i2.zip",
+      "citation": "Amante, C. & Eakins, B. W. (2009), ETOPO1 1 Arc-Minute Global Relief Model, NOAA Technical Memorandum NESDIS NGDC-24.",
+      "sourceProjection": "Grid-registered geographic WGS 84, 1 arc-minute; longitude -180 to +180 with a duplicated seam; latitude +90 to -90.",
+      "sourceVerticalDatum": "Whole-metre signed int16 elevations relative to sea level; Ice Surface version (top of Greenland/Antarctic ice sheets). Geoid-to-ellipsoid separation is not applied.",
+      "referenceShape": "NAIF PCK pck00011.tpc WGS-84-like Earth ellipsoid (6,378.1366 x 6,356.7519 km); sea-level elevations applied radially to this shape.",
+      "sourceElevationRangeM": [
+        -10898,
+        8271
+      ],
+      "sourceGrid": [
+        21601,
+        10801
+      ],
+      "sourceNoDataFillCells": 0,
+      "dataFile": "earth.u16",
+      "grid": {
+        "width": 2048,
+        "height": 1024,
+        "projection": "equirectangular",
+        "longitude": "positive-east, 0\u2013360; texel centres",
+        "latitude": "planetocentric, south-to-north; texel centres",
+        "encoding": "little-endian unsigned 16-bit; linear normalization"
+      },
+      "runtimeElevationRangeM": [
+        -10426.521,
+        6633.267
+      ],
+      "encodingRangeM": [
+        -10426.521,
+        6633.267
+      ],
+      "runtimeEquatorialPixelKm": 19.568,
+      "fileBytes": 4194304,
+      "elevationAvailable": true
+    }
+  }
+}

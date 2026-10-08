@@ -1,0 +1,30 @@
+{
+  "pluto": {
+    "checks": 64,
+    "maxPositionErrorKm": 0.020680614125197592,
+    "rmsPositionErrorKm": 0.015711810698689092,
+    "source": "Target body name: Pluto (999)                     {source: plu060_merged}",
+    "scope": "Independent off-grid Horizons queries. Spot checks, not an exhaustive bound or absolute observational accuracy."
+  },
+  "charon": {
+    "checks": 64,
+    "maxPositionErrorKm": 0.011620251366553116,
+    "rmsPositionErrorKm": 0.008955690154920934,
+    "source": "Target body name: Charon (901)                    {source: plu060_merged}",
+    "scope": "Independent off-grid Horizons queries. Spot checks, not an exhaustive bound or absolute observational accuracy."
+  },
+  "himalia": {
+    "checks": 64,
+    "maxPositionErrorKm": 0.03428391201301297,
+    "rmsPositionErrorKm": 0.02398538621389125,
+    "source": "Target body name: Himalia (506)                   {source: jup347_merged_DE442}",
+    "scope": "Independent off-grid Horizons queries. Spot checks, not an exhaustive bound or absolute observational accuracy."
+  },
+  "phoebe": {
+    "checks": 64,
+    "maxPositionErrorKm": 0.17839183381373658,
+    "rmsPositionErrorKm": 0.0890984071451652,
+    "source": "Target body name: Phoebe (609)                    {source: sat441l}",
+    "scope": "Independent off-grid Horizons queries. Spot checks, not an exhaustive bound or absolute observational accuracy."
+  }
+}

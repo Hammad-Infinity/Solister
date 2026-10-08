@@ -1,0 +1,175 @@
+[
+  {
+    "file": "code/three-r160-MIT.txt",
+    "url": "https://raw.githubusercontent.com/mrdoob/three.js/r160/LICENSE",
+    "finalUrl": "https://raw.githubusercontent.com/mrdoob/three.js/r160/LICENSE",
+    "retrieved": "2026-09-30",
+    "sha256": "852e0e8699169bf9f6fdc6bda3e682d078dcbc738b5d33e74df594721bff271d",
+    "bytes": 1081
+  },
+  {
+    "file": "code/Astronomy-Engine-MIT.txt",
+    "url": "https://raw.githubusercontent.com/cosinekitty/astronomy/master/LICENSE",
+    "finalUrl": "https://raw.githubusercontent.com/cosinekitty/astronomy/master/LICENSE",
+    "retrieved": "2026-09-30",
+    "sha256": "a76df666a7db8a06f599d08e07c3ff74c4b250b50b49c43353af2bd5bb34604e",
+    "bytes": 1095
+  },
+  {
+    "file": "code/Basis-Universal-Apache-2.0.txt",
+    "url": "https://raw.githubusercontent.com/BinomialLLC/basis_universal/master/LICENSE",
+    "finalUrl": "https://raw.githubusercontent.com/BinomialLLC/basis_universal/master/LICENSE",
+    "retrieved": "2026-09-30",
+    "sha256": "065fcf48d6af21c0b75e23be5ed5753aee75c892e1c2cf178fa6736305614a5c",
+    "bytes": 11347
+  },
+  {
+    "file": "code/Zstandard-BSD.txt",
+    "url": "https://raw.githubusercontent.com/facebook/zstd/dev/LICENSE",
+    "finalUrl": "https://raw.githubusercontent.com/facebook/zstd/dev/LICENSE",
+    "retrieved": "2026-09-30",
+    "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8",
+    "bytes": 1549
+  },
+  {
+    "file": "code/Emscripten-MIT.txt",
+    "url": "https://raw.githubusercontent.com/emscripten-core/emscripten/main/LICENSE",
+    "finalUrl": "https://raw.githubusercontent.com/emscripten-core/emscripten/main/LICENSE",
+    "retrieved": "2026-09-30",
+    "sha256": "620a78084fc7ca97c0b5dea9abf891f3ffcadfdbf305276f099c9c4e12fc1d86",
+    "bytes": 5093
+  },
+  {
+    "file": "code/ephem-js-LGPL-3.0.txt",
+    "url": "https://raw.githubusercontent.com/THRASTRO/ephem.js/2f679a1f698b4f20f9579d94da24af51559458ed/LICENSE",
+    "finalUrl": "https://raw.githubusercontent.com/THRASTRO/ephem.js/2f679a1f698b4f20f9579d94da24af51559458ed/LICENSE",
+    "retrieved": "2026-09-30",
+    "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+    "bytes": 7651
+  },
+  {
+    "file": "data/CC-BY-SA-4.0.txt",
+    "url": "https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt",
+    "finalUrl": "https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt",
+    "retrieved": "2026-09-30",
+    "sha256": "28a9529c7d0bb4dc51f4bf5c116a3d16ef247a052f7591466768ddf563fd1cf5",
+    "bytes": 20138
+  },
+  {
+    "file": "data/CC-BY-4.0.txt",
+    "url": "https://creativecommons.org/licenses/by/4.0/legalcode.txt",
+    "finalUrl": "https://creativecommons.org/licenses/by/4.0/legalcode.txt",
+    "retrieved": "2026-09-30",
+    "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+    "bytes": 18657
+  },
+  {
+    "file": "policies/Gaia-data-license.txt",
+    "url": "https://www.cosmos.esa.int/web/gaia-users/license",
+    "finalUrl": "https://www.cosmos.esa.int/web/gaia-users/license",
+    "retrieved": "2026-09-30",
+    "sha256": "90df7e10bbc0290f2bc78f122ea203535e3bbf30e99fb5d41792b4266619d9fb",
+    "bytes": 826
+  },
+  {
+    "file": "policies/Gaia-credits.txt",
+    "url": "https://www.cosmos.esa.int/web/gaia-users/credits",
+    "finalUrl": "https://www.cosmos.esa.int/web/gaia-users/credits",
+    "retrieved": "2026-09-30",
+    "sha256": "f72879dcd7387dc548deaf4a372324f35973691b520fc27398ba66ae42ee2f4f",
+    "bytes": 1809
+  },
+  {
+    "file": "policies/Gaia-archive-terms.txt",
+    "url": "https://www.cosmos.esa.int/web/esdc/terms-and-conditions",
+    "finalUrl": "https://www.cosmos.esa.int/web/esdc/terms-and-conditions",
+    "retrieved": "2026-09-30",
+    "sha256": "502a450733611d3bd8fff7684570f7721e63d0246c65c474e520760d9e70d9f4",
+    "bytes": 12075
+  },
+  {
+    "file": "policies/NASA-Deep-Star-Maps-2020.txt",
+    "url": "https://svs.gsfc.nasa.gov/4851/",
+    "finalUrl": "https://svs.gsfc.nasa.gov/4851/",
+    "retrieved": "2026-09-30",
+    "sha256": "f3adb5c064b9da7e2d1fd3244249129465b5a257f7b9ca0bccba9435279c7e23",
+    "bytes": 13763
+  },
+  {
+    "file": "policies/NASA-media-policy.txt",
+    "url": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+    "finalUrl": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+    "retrieved": "2026-09-30",
+    "sha256": "15f2668b57f2153232ee3c5097a0fbb370b2df2ca6cf3f3b515cd5029abbdff3",
+    "bytes": 11444
+  },
+  {
+    "file": "policies/Tunetank-license.txt",
+    "url": "https://tunetank.com/legal/license/",
+    "finalUrl": "https://tunetank.com/legal/license/",
+    "retrieved": "2026-09-30",
+    "sha256": "cf006cdbcc4fc5fe343872faee904e58253705a150ecf2dacaf61fdad9abdd8b",
+    "bytes": 775
+  },
+  {
+    "file": "policies/JPL-SSD-FAQ.txt",
+    "url": "https://ssd.jpl.nasa.gov/faq.html",
+    "finalUrl": "https://ssd.jpl.nasa.gov/faq.html",
+    "retrieved": "2026-09-30",
+    "sha256": "50547fe9c78fa366bc798d43dcbf3997d6c4436487b2b027355850c41d5ffc46",
+    "bytes": 12678
+  },
+  {
+    "file": "policies/HYG-source.txt",
+    "url": "https://astronexus.com/projects/hyg",
+    "finalUrl": "https://astronexus.com/projects/hyg",
+    "retrieved": "2026-09-30",
+    "sha256": "2d86e8ce0f50228bfbe36922238d334ee01964b7002eddf2cc0bf066706010fd",
+    "bytes": 3226
+  },
+  {
+    "file": "data/CC-BY-NC-3.0-IGO.txt",
+    "url": "https://creativecommons.org/licenses/by-nc/3.0/igo/legalcode",
+    "finalUrl": "https://creativecommons.org/licenses/by-nc/3.0/igo/legalcode",
+    "retrieved": "2026-09-30",
+    "sha256": "53b1b45a5c9fa36997613d6697bcf8fb45c419013680fd7cc99a0a1642897e2d",
+    "bytes": 25349
+  },
+  {
+    "file": "code/GPL-3.0.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/main/text/GPL-3.0-only.txt",
+    "retrieved": "2026-09-30",
+    "sha256": "fb981668c18a279e285fc4d83fba1e836cc84dd4daa73c9697d3cfd2d8aca6e0",
+    "bytes": 34674
+  },
+  {
+    "file": "code/GPL-2.0.txt",
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/main/text/GPL-2.0-only.txt",
+    "retrieved": "2026-09-30",
+    "sha256": "aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3",
+    "bytes": 17337
+  },
+  {
+    "file": "data/HYG-upstream-LICENSE.txt",
+    "url": "https://raw.githubusercontent.com/astronexus/HYG-Database/main/LICENSE",
+    "retrieved": "2026-09-30",
+    "sha256": "f404190403d31e0ce7223f4cb7af954485ad88077358330754dc5c892a856627",
+    "bytes": 422
+  },
+  {
+    "file": "policies/Solar-System-Scope-textures.txt",
+    "url": "https://www.solarsystemscope.com/textures/",
+    "retrieved": "2026-09-30",
+    "format": "official-source excerpt, page-retrieval fallback",
+    "sha256": "b4ac111b758d8425c3efe453b0d5389ba0e91194d13c7e18d14ffda502c3e933",
+    "bytes": 783
+  },
+  {
+    "file": "policies/JPL-notices.txt",
+    "url": "https://www.jpl.nasa.gov/caltechjpl-privacy-policies-and-important-notices/",
+    "retrieved": "2026-09-30",
+    "format": "official-source excerpt, page-retrieval fallback",
+    "sha256": "339ca2fed802083c7992ef5b4681010bdc4987ef3ef72b79e933c9928887393b",
+    "bytes": 577
+  }
+]

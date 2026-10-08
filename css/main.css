@@ -1,0 +1,33 @@
+@import "./variables.css";
+@import "./reset.css";
+@import "./layout.css";
+@import "./dock.css";
+@import "./controls.css";
+@import "./components.css";
+#quality-settings .quality-setting-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 9px;
+}
+#quality-settings .quality-setting-grid > * {
+  min-width: 0;
+  box-sizing: border-box;
+}
+#quality-settings .quality-setting-grid .control-row {
+  align-items: center;
+  margin-bottom: 0;
+}
+#quality-settings .quality-setting-grid .control-row > label {
+  flex: 0 0 68px;
+  width: 68px;
+}
+#quality-settings #fps-select,
+#quality-settings .tex-select-trigger {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+#quality-settings .quality-setting-grid .tex-select {
+  flex: 1 1 0;
+}
+

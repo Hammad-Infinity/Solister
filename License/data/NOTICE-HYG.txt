@@ -1,0 +1,13 @@
+HYG Database v4.1 attribution
+Creator: David Nash / Astronexus and contributors.
+Source: https://github.com/astronexus/HYG-Database (hyg/CURRENT/hygdata_v41.csv)
+Project: https://astronexus.com/projects/hyg
+Current upstream development is also identified as https://codeberg.org/astronexus/hyg .
+License: Creative Commons Attribution-ShareAlike 4.0 International
+https://creativecommons.org/licenses/by-sa/4.0/
+Full text: CC-BY-SA-4.0.txt. Upstream declaration: HYG-upstream-LICENSE.txt.
+
+Applies to data/constellation-motion-data.js, identified by its own source header as a derived HYG v4.1 subset. HYG compiles Hipparcos, Yale Bright Star and Gliese catalog data.
+Project adaptations: selected proper motions, distances and radial velocities, reindexed to the project's 8,790-star order; missing distance/RV encoded as zero; Float32Array representation. The original file declares catalog SHA-256 1197124227da06b1b97d5b2ef928d950d80462896113aa1b71a9e48c5da75ec6; that raw CSV was not supplied for re-verification.
+Retain credit, license link and change descriptions. Comply with ShareAlike on the adapted data and do not impose incompatible downstream restrictions. This notice does not assign HYG's license to unrelated app source or to the separately unidentified constellation figure dataset.
+V9 changes only the notice path in the header; numerical data unchanged.

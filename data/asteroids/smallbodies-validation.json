@@ -1,0 +1,175 @@
+{
+ "generated": "2026-09-20T05:36:40Z",
+ "truth": "JPL Horizons DE441 (SB441-N16), heliocentric ecliptic J2000, annual elements and state vectors 1850.0-2140.0",
+ "model": "solar-accuracy/js/asteroid-theory.js, elements frozen at one catalogue epoch, secular g/s from BAKED:SECULAR_FIT, resonance constants from BAKED:TUNING",
+ "perGroup": {
+  "trojan-l4": {
+   "base": 0.014684,
+   "slope": 0.0000041179,
+   "nearSamples": 320,
+   "medianKm": 31400000,
+   "p90Km": 153000000,
+   "samples": 4680
+  },
+  "trojan-l5": {
+   "base": 0.015991,
+   "slope": 0.0000059013,
+   "nearSamples": 208,
+   "medianKm": 43500000,
+   "p90Km": 250000000,
+   "samples": 3052
+  },
+  "hilda": {
+   "base": 0.020711,
+   "slope": 0.00002538,
+   "nearSamples": 296,
+   "medianKm": 82500000,
+   "p90Km": 293000000,
+   "samples": 4342
+  },
+  "belt": {
+   "base": 0.0029355,
+   "slope": 0.000008812,
+   "nearSamples": 1216,
+   "medianKm": 17000000,
+   "p90Km": 201000000,
+   "samples": 17800
+  }
+ },
+ "curve": {
+  "trojan-l4": [
+   {
+    "years": 10,
+    "medianKm": 2250000,
+    "p90Km": 7820000,
+    "n": 155
+   },
+   {
+    "years": 25,
+    "medianKm": 6050000,
+    "p90Km": 38400000,
+    "n": 245
+   },
+   {
+    "years": 50,
+    "medianKm": 22900000,
+    "p90Km": 115000000,
+    "n": 395
+   },
+   {
+    "years": 100,
+    "medianKm": 51600000,
+    "p90Km": 256000000,
+    "n": 805
+   },
+   {
+    "years": 150,
+    "medianKm": 27600000,
+    "p90Km": 84500000,
+    "n": 735
+   }
+  ],
+  "trojan-l5": [
+   {
+    "years": 10,
+    "medianKm": 2460000,
+    "p90Km": 9700000,
+    "n": 102
+   },
+   {
+    "years": 25,
+    "medianKm": 8870000,
+    "p90Km": 54400000,
+    "n": 158
+   },
+   {
+    "years": 50,
+    "medianKm": 46600000,
+    "p90Km": 176000000,
+    "n": 258
+   },
+   {
+    "years": 100,
+    "medianKm": 121000000,
+    "p90Km": 303000000,
+    "n": 522
+   },
+   {
+    "years": 150,
+    "medianKm": 34500000,
+    "p90Km": 165000000,
+    "n": 484
+   }
+  ],
+  "hilda": [
+   {
+    "years": 10,
+    "medianKm": 3200000,
+    "p90Km": 12700000,
+    "n": 145
+   },
+   {
+    "years": 25,
+    "medianKm": 12300000,
+    "p90Km": 37600000,
+    "n": 225
+   },
+   {
+    "years": 50,
+    "medianKm": 36900000,
+    "p90Km": 91600000,
+    "n": 367
+   },
+   {
+    "years": 100,
+    "medianKm": 104000000,
+    "p90Km": 263000000,
+    "n": 743
+   },
+   {
+    "years": 150,
+    "medianKm": 162000000,
+    "p90Km": 408000000,
+    "n": 688
+   }
+  ],
+  "belt": [
+   {
+    "years": 10,
+    "medianKm": 473000,
+    "p90Km": 5250000,
+    "n": 591
+   },
+   {
+    "years": 25,
+    "medianKm": 3460000,
+    "p90Km": 23500000,
+    "n": 929
+   },
+   {
+    "years": 50,
+    "medianKm": 9740000,
+    "p90Km": 80700000,
+    "n": 1503
+   },
+   {
+    "years": 100,
+    "medianKm": 26300000,
+    "p90Km": 215000000,
+    "n": 3057
+   },
+   {
+    "years": 150,
+    "medianKm": 56400000,
+    "p90Km": 418000000,
+    "n": 2803
+   }
+  ]
+ },
+ "notes": [
+  "errors are heliocentric three-dimensional position differences, no fitting or offset removal",
+  "the centred anchor is what the shipped catalogue uses (epoch 2026, drawn 1800-2200)",
+  "radial and in-track columns are signed medians, so a systematic one-sided value is a model bias",
+  "condition-code inflation (CONDITION_INFLATION) is a design choice, not measured here: every object in this set has condition code 0"
+ ]
+}

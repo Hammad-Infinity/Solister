@@ -1,0 +1,51 @@
+Official-source text snapshot; retrieved 2026-09-30.
+URL: https://www.cosmos.esa.int/web/gaia-users/credits
+Final URL: https://www.cosmos.esa.int/web/gaia-users/credits
+HTML navigation/scripts/styles removed; this is not a new license grant.
+
+COSMOS Credits - Gaia Users - Cosmos
+Credits - Gaia Users
+Gaia data credits and acknowledgements
+When using Gaia data, please acknowledge the people and institutes that were involved in making the data available to you. Each Data Release comes with its own acknowledgements and its own credit and citation instructions. Below, links are given to guide you the respective information. For any question, please contact
+the Gaia Helpdesk
+.
+Gaia Focused Product Release
+Credit and Citation instructions
+Acknowledgements
+How to cite chapters of the data release documentation
+DOI information
+Gaia Data Release 3
+Credit and Citation instructions
+Acknowledgements
+How to cite chapters of the data release documentation
+DOI information
+Gaia Early Data Release 3
+Credit and Citation instructions
+Acknowledgements
+How to cite chapters of the data release documentation
+DOI information
+Gaia Data Release 2
+Credit and Citation instructions
+Acknowledgements
+How to cite chapters of the data release documentation
+DOI information
+Gaia Data Release 1
+Credit and Citation instructions
+Acknowledgements
+How to cite chapters of the data release documentation
+DOI information
+Gaia Data License
+​​​​​​​
+​​​​​​​
+Sanitized for DXP 7.3
+Removed a total of (1) style float:right;
+Hidden
+My account
+placeholder
+PeopleEditorPersonalDetails
+portlet
+Close
+ESA uses cookies to track visits to our website only, no personal information is collected.
+        By continuing to use the site you are agreeing to our use of cookies.
+OK
+Find out more about our cookie policy.

@@ -1,0 +1,57 @@
+Official-source text snapshot; retrieved 2026-09-30.
+URL: https://astronexus.com/projects/hyg
+Final URL: https://astronexus.com/projects/hyg
+HTML navigation/scripts/styles removed; this is not a new license grant.
+
+The Astronomy Nexus
+HYG Database
+The HYG database (current version: v4.2) is a compilation of interesting (to me, anyway) stellar data from a variety of catalogs. 
+    They are useful for background information on all sorts of data: star names, positions, brightnesses, distances, and spectrum information.  
+    A version of the HYG catalog also powers the
+charts
+elsewhere on this site.
+HYG is hosted at
+Codeberg
+as well as here. The version hosted here will always be 
+the most recent version saved at Codeberg.
+Downloads
+Recent (2025) versions:
+HYG 4.2:
+Current version (2025), containing all stars in Hipparcos, Yale Bright Star, and Gliese catalogs (almost 120,000 stars, 14 MB),
+CC BY-SA-4.0 license
+Older versions (no longer updated)
+HYG 3.7:
+Previous major version (2023). Has the same quantitative star data as v4.x 
+  (some minor differences in a few star names or IDs), CC BY-SA-2.5 license.
+HYG 2.0:
+Older (2007) version. It contains the same core data as v3.x and later, but lacks 
+some of the new fields, like variable star IDs and constellation IDs.
+HYG 1.1:
+Even older (2005-2006) version, which is significantly smaller (all stars brighter than 
+magnitude +9.0, or closer than 50 parsecs -- 87476 stars)
+About the HYG Database
+The HYG database is a subset of the data in three major catalogs:
+the Hipparcos Catalog
+the Yale Bright Star Catalog (5th Edition)
+and the Gliese Catalog of Nearby Stars (3rd Edition).
+Each of these catalogs contains information useful to amateur astronomers:
+The Hipparcos catalog is, up until the late 2010s, the largest collection of high-accuracy stellar positional data, particularly parallaxes, which makes it useful as a starting point for stellar distance data.
+The Yale Bright Star Catalog contains basic data on essentially all naked-eye stars, including much information (such as the traditional Bayer Greek letters and Flamsteed numbers) missing from many other catalogs
+The Gliese catalog is the most comprehensive catalog of nearby stars (those within 75 light years of the Sun). It contains many fainter stars not found in Hipparcos.
+The name of the database comes from the three catalogs comprising its data:
+H
+ipparcos,
+Y
+ale, and
+G
+liese.
+All told, v 2.x of this database contains ALL stars that are either brighter than a certain magnitude cutoff (magnitude +7.5 to +9.0) or within 50 parsecs (about 160 light years) from the Sun.  
+    The current version, v. 4.2, has no magnitude cutoff:  any star in Hipparcos, Yale, or Gliese is represented.
+The database is a comma separated values (CSV) file that can be imported into most database and spreadsheet programs. On this web site it is stored as a Zip file or a GZ file, which most popular unzippers can open.
+License
+The HYG database is licensed with
+the Creative Commons Attribution-ShareAlike 4.0 license
+.
+Additional Background Information:
+For more information about the HYG database, including a detailed description of each field and a history of past versions, read
+the HYG Details page.
