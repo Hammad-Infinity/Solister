@@ -6,7 +6,7 @@ Audit date: 2026-09-30. Scope: supplied source files, V8 additions and user-repo
 - `OPEN-ITEMS.md`: issues to resolve before distribution, especially commercial release.
 - `code/`: upstream software license texts (not all project code).
 - `theories/`: specific satellite notices, theory provenance and bundle comparisons.
-- `data/`: catalog notices and Creative Commons legal texts.
+- `data/`: catalog notices, global-elevation provenance, and Creative Commons legal texts.
 - `textures/`, `audio/`: asset credits and missing provenance.
 - `policies/`: dated official-source text snapshots/excerpts; policies are not universal software licenses.
 - `sources.json`: retrieved URLs, dates and hashes for copied texts.
@@ -21,5 +21,6 @@ Audit date: 2026-09-30. Scope: supplied source files, V8 additions and user-repo
 4. Solar System Scope texture pack: **CC BY 4.0**, subject to asset identity and required attribution/change indications.
 5. NASA SVS Deep Star Maps 2020: likely source family for the reported Milky Way map; exact local variant unverified. Retain NASA/Gaia credits and review third-party terms, rather than declaring all NASA/JPL material public domain.
 6. Tunetank: six unnamed local track slots cannot be tied to individual licensed recordings. Current general license excludes video games; website/educational permission is not proof of permission for this bundle or standalone redistribution.
+7. Elevation grids: source attribution and conversion metadata are recorded in `data/NOTICE-ELEVATION.md` and `../data/elevation/catalog.json`. The compact grids are resampled/quantized derivatives; verify each provider's current terms before redistribution or commercial use.
 
 Nothing in this patch removes music, changes celestial data, imposes a new license on the user's code, or claims endorsement by the credited organizations. Obtain appropriate legal review for a release if needed.

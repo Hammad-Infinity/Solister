@@ -1,8 +1,8 @@
 function createCanvasTexture(width, height, drawFn) {
-    const canvas = document.createElement('canvas');
+    const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     drawFn(ctx, width, height);
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.RepeatWrapping;
@@ -11,17 +11,98 @@ function createCanvasTexture(width, height, drawFn) {
     texture.needsUpdate = true;
     return texture;
 }
+
+function createEarthCloudTexture() {
+    if (proceduralTextures["earth-clouds"]) return proceduralTextures["earth-clouds"];
+    const width = 512;
+    const height = 256;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    let seed = 19472831;
+    const random = () => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return seed / 4294967296;
+    };
+    const octaves = [
+        [ 6, 3, .34 ],
+        [ 12, 6, .24 ],
+        [ 24, 12, .17 ],
+        [ 48, 24, .12 ],
+        [ 96, 48, .08 ],
+        [ 192, 96, .05 ]
+    ].map(([gridWidth, gridHeight, weight]) => {
+        const values = new Float32Array(gridWidth * gridHeight);
+        for (let i = 0; i < values.length; i++) values[i] = random();
+        return {
+            width: gridWidth,
+            height: gridHeight,
+            weight: weight,
+            values: values
+        };
+    });
+    const sample = (grid, u, v) => {
+        const x = u * grid.width;
+        const xFloor = Math.floor(x);
+        const x0 = (xFloor % grid.width + grid.width) % grid.width;
+        const x1 = (x0 + 1) % grid.width;
+        const fx = x - xFloor;
+        const y = Math.max(0, Math.min(grid.height - 1, v * (grid.height - 1)));
+        const y0 = Math.floor(y);
+        const y1 = Math.min(grid.height - 1, y0 + 1);
+        const fy = y - y0;
+        const a = grid.values[y0 * grid.width + x0] * (1 - fx) + grid.values[y0 * grid.width + x1] * fx;
+        const b = grid.values[y1 * grid.width + x0] * (1 - fx) + grid.values[y1 * grid.width + x1] * fx;
+        return a * (1 - fy) + b * fy;
+    };
+    const smooth = (edge0, edge1, value) => {
+        const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+        return t * t * (3 - 2 * t);
+    };
+    const image = context.createImageData(width, height);
+    const pixels = image.data;
+    for (let y = 0; y < height; y++) {
+        const v = (y + .5) / height;
+        const polar = Math.abs(2 * v - 1);
+        for (let x = 0; x < width; x++) {
+            const u = (x + .5) / width;
+            let field = 0;
+            for (const grid of octaves) field += sample(grid, u, v) * grid.weight;
+            const threshold = .39 + polar * .05;
+            const density = smooth(threshold, threshold + .17, field);
+            const index = (y * width + x) * 4;
+            const signal = Math.round(density * 255);
+            pixels[index] = signal;
+            pixels[index + 1] = signal;
+            pixels[index + 2] = signal;
+            pixels[index + 3] = 255;
+        }
+    }
+    context.putImageData(image, 0, 0);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.name = "Deterministic procedural Earth cloud cover";
+    texture.userData.cloudMaskChannel = "rgb";
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.colorSpace = THREE.NoColorSpace;
+    texture.needsUpdate = true;
+    proceduralTextures["earth-clouds"] = texture;
+    return texture;
+}
+
 function createThemeGradientBackground() {
     const size = 512;
-    const canvas = document.createElement('canvas');
+    const canvas = document.createElement("canvas");
     canvas.width = size;
     canvas.height = size;
-    const ctx = canvas.getContext('2d');
-    const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size * 0.75);
-    g.addColorStop(0.00, '#1e1e1e');
-    g.addColorStop(0.45, '#161616');
-    g.addColorStop(0.75, '#0d0d0d');
-    g.addColorStop(1.00, '#050505');
+    const ctx = canvas.getContext("2d");
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size * .75);
+    g.addColorStop(0, "#1e1e1e");
+    g.addColorStop(.45, "#161616");
+    g.addColorStop(.75, "#0d0d0d");
+    g.addColorStop(1, "#050505");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, size, size);
     const tex = new THREE.CanvasTexture(canvas);
@@ -29,230 +110,406 @@ function createThemeGradientBackground() {
     tex.needsUpdate = true;
     return tex;
 }
+
 function drawMercuryTexture(ctx, w, h) {
-    ctx.fillStyle = '#9a9a9a'; ctx.fillRect(0,0,w,h);
+    ctx.fillStyle = "#9a9a9a";
+    ctx.fillRect(0, 0, w, h);
     for (let i = 0; i < 200; i++) {
-        const x = Math.random()*w, y = Math.random()*h, r = 3+Math.random()*15;
-        const dark = Math.random() > 0.5;
-        ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
-        ctx.fillStyle = dark ? `rgba(80,80,80,${0.2+Math.random()*0.4})` : `rgba(180,180,180,${0.15+Math.random()*0.3})`;
+        const x = Math.random() * w, y = Math.random() * h, r = 3 + Math.random() * 15;
+        const dark = Math.random() > .5;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = dark ? `rgba(80,80,80,${.2 + Math.random() * .4})` : `rgba(180,180,180,${.15 + Math.random() * .3})`;
         ctx.fill();
-        ctx.beginPath(); ctx.arc(x,y,r*0.7,0,Math.PI*2);
-        ctx.strokeStyle = `rgba(60,60,60,${0.3})`; ctx.lineWidth = 1; ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x, y, r * .7, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(60,60,60,${.3})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
     }
 }
+
+function drawVenusCloudTexture(ctx, w, h) {
+    const base = ctx.createLinearGradient(0, 0, 0, h);
+    base.addColorStop(0, "#e9e5dc");
+    base.addColorStop(.18, "#f6f3eb");
+    base.addColorStop(.42, "#fffdf6");
+    base.addColorStop(.63, "#f4f0e7");
+    base.addColorStop(.84, "#fbf8f0");
+    base.addColorStop(1, "#e8e3d9");
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, w, h);
+    for (let y = 0; y < h; y++) {
+        const latitude = y / Math.max(1, h - 1);
+        const broadBand = Math.sin(latitude * Math.PI * 14 + .3) * .5 + .5;
+        const alpha = .012 + broadBand * .022;
+        ctx.fillStyle = `rgba(151,139,120,${alpha})`;
+        ctx.fillRect(0, y, w, 1);
+    }
+    for (let band = 0; band < 88; band++) {
+        const y0 = (band + .5) * h / 88;
+        const phase = band * 2.399963229728653;
+        const amplitude = 1.2 + (band % 5) * .55;
+        ctx.beginPath();
+        for (let x = 0; x <= w; x += 8) {
+            const u = x / w;
+            const wave = Math.sin(u * Math.PI * 6 + phase) * amplitude + Math.sin(u * Math.PI * 14 + phase * .7) * amplitude * .32;
+            const y = y0 + wave;
+            if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = band % 4 === 0 ? "rgba(158,145,126,0.12)" : "rgba(255,255,255,0.16)";
+        ctx.lineWidth = band % 6 === 0 ? 2 : 1;
+        ctx.stroke();
+    }
+}
+
 function drawVenusTexture(ctx, w, h) {
-    const grad = ctx.createLinearGradient(0,0,w,h);
-    grad.addColorStop(0,'#e8d5a3'); grad.addColorStop(0.3,'#d4b880'); grad.addColorStop(0.6,'#f0e0c0'); grad.addColorStop(1,'#c8a870');
-    ctx.fillStyle = grad; ctx.fillRect(0,0,w,h);
-    for (let i = 0; i < 80; i++) {
-        const x = Math.random()*w, y = Math.random()*h;
-        const rx = 30+Math.random()*80, ry = 10+Math.random()*30;
-        ctx.beginPath(); ctx.ellipse(x,y,rx,ry,Math.random()*Math.PI,0,Math.PI*2);
-        ctx.fillStyle = `rgba(240,225,180,${0.08+Math.random()*0.15})`; ctx.fill();
-    }
+    drawVenusCloudTexture(ctx, w, h);
 }
+
 function drawEarthTexture(ctx, w, h) {
-    const oceanGrad = ctx.createLinearGradient(0,0,0,h);
-    oceanGrad.addColorStop(0,'#1a5c9e'); oceanGrad.addColorStop(0.5,'#1e7bc4'); oceanGrad.addColorStop(1,'#1a5c9e');
-    ctx.fillStyle = oceanGrad; ctx.fillRect(0,0,w,h);
-    const continents = [
-        { x:w*0.25, y:h*0.35, rx:w*0.22, ry:h*0.15, rot:0.3, color:'#3d8b40' },
-        { x:w*0.6, y:h*0.3, rx:w*0.25, ry:h*0.2, rot:-0.2, color:'#4a8f3d' },
-        { x:w*0.35, y:h*0.65, rx:w*0.18, ry:h*0.12, rot:0.5, color:'#5a9a45' },
-        { x:w*0.7, y:h*0.6, rx:w*0.15, ry:h*0.18, rot:-0.4, color:'#3d7a35' },
-        { x:w*0.5, y:h*0.45, rx:w*0.1, ry:h*0.08, rot:0.1, color:'#6aad50' },
-        { x:w*0.15, y:h*0.5, rx:w*0.12, ry:h*0.1, rot:-0.3, color:'#4a8f3d' },
-        { x:w*0.45, y:h*0.2, rx:w*0.15, ry:h*0.08, rot:0.2, color:'#558f38' },
-    ];
+    const oceanGrad = ctx.createLinearGradient(0, 0, 0, h);
+    oceanGrad.addColorStop(0, "#1a5c9e");
+    oceanGrad.addColorStop(.5, "#1e7bc4");
+    oceanGrad.addColorStop(1, "#1a5c9e");
+    ctx.fillStyle = oceanGrad;
+    ctx.fillRect(0, 0, w, h);
+    const continents = [ {
+        x: w * .25,
+        y: h * .35,
+        rx: w * .22,
+        ry: h * .15,
+        rot: .3,
+        color: "#3d8b40"
+    }, {
+        x: w * .6,
+        y: h * .3,
+        rx: w * .25,
+        ry: h * .2,
+        rot: -.2,
+        color: "#4a8f3d"
+    }, {
+        x: w * .35,
+        y: h * .65,
+        rx: w * .18,
+        ry: h * .12,
+        rot: .5,
+        color: "#5a9a45"
+    }, {
+        x: w * .7,
+        y: h * .6,
+        rx: w * .15,
+        ry: h * .18,
+        rot: -.4,
+        color: "#3d7a35"
+    }, {
+        x: w * .5,
+        y: h * .45,
+        rx: w * .1,
+        ry: h * .08,
+        rot: .1,
+        color: "#6aad50"
+    }, {
+        x: w * .15,
+        y: h * .5,
+        rx: w * .12,
+        ry: h * .1,
+        rot: -.3,
+        color: "#4a8f3d"
+    }, {
+        x: w * .45,
+        y: h * .2,
+        rx: w * .15,
+        ry: h * .08,
+        rot: .2,
+        color: "#558f38"
+    } ];
     continents.forEach(c => {
-        ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.rot);
-        ctx.beginPath(); ctx.ellipse(0,0,c.rx,c.ry,0,0,Math.PI*2);
-        ctx.fillStyle = c.color; ctx.fill();
+        ctx.save();
+        ctx.translate(c.x, c.y);
+        ctx.rotate(c.rot);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, c.rx, c.ry, 0, 0, Math.PI * 2);
+        ctx.fillStyle = c.color;
+        ctx.fill();
         for (let i = 0; i < 15; i++) {
-            const ox = (Math.random()-0.5)*c.rx*1.5, oy = (Math.random()-0.5)*c.ry*1.5;
-            if (Math.abs(ox) < c.rx*0.6 && Math.abs(oy) < c.ry*0.6) {
-                ctx.beginPath(); ctx.ellipse(ox,oy,c.rx*0.2,c.ry*0.25,0,0,Math.PI*2);
-                ctx.fillStyle = `rgba(60,120,50,${0.3+Math.random()*0.3})`; ctx.fill();
+            const ox = (Math.random() - .5) * c.rx * 1.5, oy = (Math.random() - .5) * c.ry * 1.5;
+            if (Math.abs(ox) < c.rx * .6 && Math.abs(oy) < c.ry * .6) {
+                ctx.beginPath();
+                ctx.ellipse(ox, oy, c.rx * .2, c.ry * .25, 0, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(60,120,50,${.3 + Math.random() * .3})`;
+                ctx.fill();
             }
         }
         ctx.restore();
     });
-    ctx.fillStyle = 'rgba(240,245,255,0.7)';
-    ctx.fillRect(0,0,w,h*0.06); ctx.fillRect(0,h*0.94,w,h*0.06);
+    ctx.fillStyle = "rgba(240,245,255,0.7)";
+    ctx.fillRect(0, 0, w, h * .06);
+    ctx.fillRect(0, h * .94, w, h * .06);
     for (let i = 0; i < 40; i++) {
-        const x = Math.random()*w, y = Math.random()*h, rx = 20+Math.random()*60, ry = 5+Math.random()*15;
-        ctx.beginPath(); ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);
-        ctx.fillStyle = `rgba(255,255,255,${0.1+Math.random()*0.2})`; ctx.fill();
+        const x = Math.random() * w, y = Math.random() * h, rx = 20 + Math.random() * 60, ry = 5 + Math.random() * 15;
+        ctx.beginPath();
+        ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${.1 + Math.random() * .2})`;
+        ctx.fill();
     }
 }
+
 function drawMarsTexture(ctx, w, h) {
-    const grad = ctx.createLinearGradient(0,0,0,h);
-    grad.addColorStop(0,'#d4703a'); grad.addColorStop(0.4,'#c45030'); grad.addColorStop(0.7,'#b84028'); grad.addColorStop(1,'#a03020');
-    ctx.fillStyle = grad; ctx.fillRect(0,0,w,h);
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, "#d4703a");
+    grad.addColorStop(.4, "#c45030");
+    grad.addColorStop(.7, "#b84028");
+    grad.addColorStop(1, "#a03020");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
     for (let i = 0; i < 100; i++) {
-        const x = Math.random()*w, y = Math.random()*h, r = 5+Math.random()*25;
-        ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
-        ctx.fillStyle = `rgba(130,50,30,${0.2+Math.random()*0.4})`; ctx.fill();
-        ctx.beginPath(); ctx.arc(x,y,r*0.6,0,Math.PI*2);
-        ctx.fillStyle = `rgba(200,100,60,${0.15+Math.random()*0.25})`; ctx.fill();
+        const x = Math.random() * w, y = Math.random() * h, r = 5 + Math.random() * 25;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(130,50,30,${.2 + Math.random() * .4})`;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(x, y, r * .6, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200,100,60,${.15 + Math.random() * .25})`;
+        ctx.fill();
     }
-    ctx.fillStyle = 'rgba(240,240,250,0.6)'; ctx.fillRect(0,0,w,h*0.05);
+    ctx.fillStyle = "rgba(240,240,250,0.6)";
+    ctx.fillRect(0, 0, w, h * .05);
     for (let i = 0; i < 30; i++) {
-        const x = Math.random()*w, y = Math.random()*h, rx = 30+Math.random()*80, ry = 15+Math.random()*40;
-        ctx.beginPath(); ctx.ellipse(x,y,rx,ry,Math.random()*0.5,0,Math.PI*2);
-        ctx.fillStyle = `rgba(100,30,20,${0.1+Math.random()*0.2})`; ctx.fill();
+        const x = Math.random() * w, y = Math.random() * h, rx = 30 + Math.random() * 80, ry = 15 + Math.random() * 40;
+        ctx.beginPath();
+        ctx.ellipse(x, y, rx, ry, Math.random() * .5, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(100,30,20,${.1 + Math.random() * .2})`;
+        ctx.fill();
     }
 }
+
 function drawJupiterTexture(ctx, w, h) {
-    const bands = [
-        { y:0.0, color:'#c8a070' }, { y:0.08, color:'#e8d0b0' }, { y:0.18, color:'#b89060' }, { y:0.3, color:'#f0e0c0' },
-        { y:0.42, color:'#c49868' }, { y:0.55, color:'#e0c8a0' }, { y:0.65, color:'#a88050' }, { y:0.75, color:'#d8bc90' },
-        { y:0.85, color:'#b89060' }, { y:0.92, color:'#e0c8a0' }, { y:1.0, color:'#c49868' }
-    ];
-    for (let i = 0; i < bands.length-1; i++) {
-        const y1 = bands[i].y*h, y2 = bands[i+1].y*h;
-        const grad = ctx.createLinearGradient(0,y1,0,y2);
-        grad.addColorStop(0,bands[i].color); grad.addColorStop(1,bands[i+1].color);
-        ctx.fillStyle = grad; ctx.fillRect(0,y1,w,y2-y1);
+    const bands = [ {
+        y: 0,
+        color: "#c8a070"
+    }, {
+        y: .08,
+        color: "#e8d0b0"
+    }, {
+        y: .18,
+        color: "#b89060"
+    }, {
+        y: .3,
+        color: "#f0e0c0"
+    }, {
+        y: .42,
+        color: "#c49868"
+    }, {
+        y: .55,
+        color: "#e0c8a0"
+    }, {
+        y: .65,
+        color: "#a88050"
+    }, {
+        y: .75,
+        color: "#d8bc90"
+    }, {
+        y: .85,
+        color: "#b89060"
+    }, {
+        y: .92,
+        color: "#e0c8a0"
+    }, {
+        y: 1,
+        color: "#c49868"
+    } ];
+    for (let i = 0; i < bands.length - 1; i++) {
+        const y1 = bands[i].y * h, y2 = bands[i + 1].y * h;
+        const grad = ctx.createLinearGradient(0, y1, 0, y2);
+        grad.addColorStop(0, bands[i].color);
+        grad.addColorStop(1, bands[i + 1].color);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, y1, w, y2 - y1);
     }
-    const grsX = w*0.65, grsY = h*0.68;
-    ctx.save(); ctx.translate(grsX,grsY);
-    ctx.beginPath(); ctx.ellipse(0,0,w*0.08,h*0.05,0,0,Math.PI*2); ctx.fillStyle='#c04030'; ctx.fill();
-    ctx.beginPath(); ctx.ellipse(0,0,w*0.05,h*0.03,0,0,Math.PI*2); ctx.fillStyle='#d05040'; ctx.fill();
+    const grsX = w * .65, grsY = h * .68;
+    ctx.save();
+    ctx.translate(grsX, grsY);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * .08, h * .05, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#c04030";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * .05, h * .03, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#d05040";
+    ctx.fill();
     ctx.restore();
     for (let i = 0; i < 200; i++) {
-        const x = Math.random()*w, y = Math.random()*h, rx = 15+Math.random()*50, ry = 3+Math.random()*8;
-        ctx.beginPath(); ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);
-        const alpha = 0.05+Math.random()*0.2;
-        ctx.fillStyle = Math.random()>0.5 ? `rgba(255,255,255,${alpha})` : `rgba(80,50,30,${alpha})`;
+        const x = Math.random() * w, y = Math.random() * h, rx = 15 + Math.random() * 50, ry = 3 + Math.random() * 8;
+        ctx.beginPath();
+        ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+        const alpha = .05 + Math.random() * .2;
+        ctx.fillStyle = Math.random() > .5 ? `rgba(255,255,255,${alpha})` : `rgba(80,50,30,${alpha})`;
         ctx.fill();
     }
 }
+
 function drawSaturnTexture(ctx, w, h) {
-    const bands = [
-        { y:0.0, color:'#e8d5a3' }, { y:0.1, color:'#d4bc8a' }, { y:0.22, color:'#f0e0c0' }, { y:0.35, color:'#c8a870' },
-        { y:0.5, color:'#e0c898' }, { y:0.62, color:'#d0b888' }, { y:0.75, color:'#e8d0a0' }, { y:0.88, color:'#c8a870' },
-        { y:1.0, color:'#d8bc90' }
-    ];
-    for (let i = 0; i < bands.length-1; i++) {
-        const y1 = bands[i].y*h, y2 = bands[i+1].y*h;
-        const grad = ctx.createLinearGradient(0,y1,0,y2);
-        grad.addColorStop(0,bands[i].color); grad.addColorStop(1,bands[i+1].color);
-        ctx.fillStyle = grad; ctx.fillRect(0,y1,w,y2-y1);
+    const bands = [ {
+        y: 0,
+        color: "#e8d5a3"
+    }, {
+        y: .1,
+        color: "#d4bc8a"
+    }, {
+        y: .22,
+        color: "#f0e0c0"
+    }, {
+        y: .35,
+        color: "#c8a870"
+    }, {
+        y: .5,
+        color: "#e0c898"
+    }, {
+        y: .62,
+        color: "#d0b888"
+    }, {
+        y: .75,
+        color: "#e8d0a0"
+    }, {
+        y: .88,
+        color: "#c8a870"
+    }, {
+        y: 1,
+        color: "#d8bc90"
+    } ];
+    for (let i = 0; i < bands.length - 1; i++) {
+        const y1 = bands[i].y * h, y2 = bands[i + 1].y * h;
+        const grad = ctx.createLinearGradient(0, y1, 0, y2);
+        grad.addColorStop(0, bands[i].color);
+        grad.addColorStop(1, bands[i + 1].color);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, y1, w, y2 - y1);
     }
     for (let i = 0; i < 150; i++) {
-        const x = Math.random()*w, y = Math.random()*h, rx = 10+Math.random()*40, ry = 2+Math.random()*6;
-        ctx.beginPath(); ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);
-        ctx.fillStyle = `rgba(200,180,140,${0.08+Math.random()*0.15})`; ctx.fill();
-    }
-}
-function drawUranusTexture(ctx, w, h) {
-    const grad = ctx.createLinearGradient(0,0,0,h);
-    grad.addColorStop(0,'#8ec8e0'); grad.addColorStop(0.3,'#7ec8e3'); grad.addColorStop(0.5,'#a0d8e8'); grad.addColorStop(0.7,'#7ec8e3'); grad.addColorStop(1,'#6ab8d8');
-    ctx.fillStyle = grad; ctx.fillRect(0,0,w,h);
-    for (let i = 0; i < 30; i++) {
-        const y = Math.random()*h;
-        ctx.fillStyle = `rgba(255,255,255,${0.03+Math.random()*0.08})`;
-        ctx.fillRect(0,y,w,5+Math.random()*15);
-    }
-}
-function drawNeptuneTexture(ctx, w, h) {
-    const grad = ctx.createLinearGradient(0,0,0,h);
-    grad.addColorStop(0,'#2a4a8a'); grad.addColorStop(0.3,'#3a5ca0'); grad.addColorStop(0.5,'#2a4a8a'); grad.addColorStop(0.7,'#3a5ca0'); grad.addColorStop(1,'#1a3a70');
-    ctx.fillStyle = grad; ctx.fillRect(0,0,w,h);
-    ctx.beginPath(); ctx.ellipse(w*0.5,h*0.4,w*0.15,h*0.08,0.2,0,Math.PI*2);
-    ctx.fillStyle = 'rgba(200,220,255,0.3)'; ctx.fill();
-    for (let i = 0; i < 40; i++) {
-        const y = Math.random()*h;
-        ctx.fillStyle = `rgba(255,255,255,${0.03+Math.random()*0.06})`;
-        ctx.fillRect(0,y,w,3+Math.random()*10);
-    }
-}
-function drawMoonTexture(ctx, w, h) {
-    ctx.fillStyle = '#b0b0b0'; ctx.fillRect(0,0,w,h);
-    for (let i = 0; i < 300; i++) {
-        const x = Math.random()*w, y = Math.random()*h, r = 2+Math.random()*12;
-        const dark = Math.random() > 0.4;
-        ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
-        ctx.fillStyle = dark ? `rgba(80,80,80,${0.2+Math.random()*0.5})` : `rgba(200,200,200,${0.1+Math.random()*0.3})`;
+        const x = Math.random() * w, y = Math.random() * h, rx = 10 + Math.random() * 40, ry = 2 + Math.random() * 6;
+        ctx.beginPath();
+        ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200,180,140,${.08 + Math.random() * .15})`;
         ctx.fill();
     }
-    const marias = [
-        { x:w*0.3, y:h*0.35, r:w*0.15 },
-        { x:w*0.6, y:h*0.5, r:w*0.2 },
-        { x:w*0.45, y:h*0.7, r:w*0.12 },
-        { x:w*0.7, y:h*0.3, r:w*0.1 },
-    ];
+}
+
+function drawUranusTexture(ctx, w, h) {
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, "#8ec8e0");
+    grad.addColorStop(.3, "#7ec8e3");
+    grad.addColorStop(.5, "#a0d8e8");
+    grad.addColorStop(.7, "#7ec8e3");
+    grad.addColorStop(1, "#6ab8d8");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    for (let i = 0; i < 30; i++) {
+        const y = Math.random() * h;
+        ctx.fillStyle = `rgba(255,255,255,${.03 + Math.random() * .08})`;
+        ctx.fillRect(0, y, w, 5 + Math.random() * 15);
+    }
+}
+
+function drawNeptuneTexture(ctx, w, h) {
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, "#2a4a8a");
+    grad.addColorStop(.3, "#3a5ca0");
+    grad.addColorStop(.5, "#2a4a8a");
+    grad.addColorStop(.7, "#3a5ca0");
+    grad.addColorStop(1, "#1a3a70");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    ctx.beginPath();
+    ctx.ellipse(w * .5, h * .4, w * .15, h * .08, .2, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(200,220,255,0.3)";
+    ctx.fill();
+    for (let i = 0; i < 40; i++) {
+        const y = Math.random() * h;
+        ctx.fillStyle = `rgba(255,255,255,${.03 + Math.random() * .06})`;
+        ctx.fillRect(0, y, w, 3 + Math.random() * 10);
+    }
+}
+
+function drawMoonTexture(ctx, w, h) {
+    ctx.fillStyle = "#b0b0b0";
+    ctx.fillRect(0, 0, w, h);
+    for (let i = 0; i < 300; i++) {
+        const x = Math.random() * w, y = Math.random() * h, r = 2 + Math.random() * 12;
+        const dark = Math.random() > .4;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = dark ? `rgba(80,80,80,${.2 + Math.random() * .5})` : `rgba(200,200,200,${.1 + Math.random() * .3})`;
+        ctx.fill();
+    }
+    const marias = [ {
+        x: w * .3,
+        y: h * .35,
+        r: w * .15
+    }, {
+        x: w * .6,
+        y: h * .5,
+        r: w * .2
+    }, {
+        x: w * .45,
+        y: h * .7,
+        r: w * .12
+    }, {
+        x: w * .7,
+        y: h * .3,
+        r: w * .1
+    } ];
     marias.forEach(m => {
-        ctx.beginPath(); ctx.arc(m.x,m.y,m.r,0,Math.PI*2);
-        ctx.fillStyle = 'rgba(70,70,80,0.35)'; ctx.fill();
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(70,70,80,0.35)";
+        ctx.fill();
     });
 }
+
 function drawUranusRingTexture(ctx, w, h) {
     ctx.clearRect(0, 0, w, h);
-    const bands = [
-        [0.06, 0.10, 0.10],
-        [0.16, 0.20, 0.14],
-        [0.28, 0.33, 0.20],
-        [0.40, 0.47, 0.55],
-        [0.55, 0.60, 0.50],
-        [0.68, 0.72, 0.28],
-        [0.76, 0.79, 0.35],
-        [0.82, 0.86, 0.60],
-        [0.93, 0.99, 1.00],
-    ];
+    const bands = [ [ .06, .1, .1 ], [ .16, .2, .14 ], [ .28, .33, .2 ], [ .4, .47, .55 ], [ .55, .6, .5 ], [ .68, .72, .28 ], [ .76, .79, .35 ], [ .82, .86, .6 ], [ .93, .99, 1 ] ];
     for (const [v0, v1, a] of bands) {
         const y0 = (1 - v1) * h, y1 = (1 - v0) * h;
         const g = ctx.createLinearGradient(0, y0, 0, y1);
-        g.addColorStop(0,   'rgba(200,210,225,0)');
-        g.addColorStop(0.5, `rgba(200,210,225,${a})`);
-        g.addColorStop(1,   'rgba(200,210,225,0)');
+        g.addColorStop(0, "rgba(200,210,225,0)");
+        g.addColorStop(.5, `rgba(200,210,225,${a})`);
+        g.addColorStop(1, "rgba(200,210,225,0)");
         ctx.fillStyle = g;
         ctx.fillRect(0, y0, w, y1 - y0);
     }
 }
+
 function drawNeptuneRingTexture(ctx, w, h) {
     ctx.clearRect(0, 0, w, h);
-    const RING_INNER = 1.60, RING_OUTER = 2.65, RANGE = RING_OUTER - RING_INNER;
-    const bands = [
-        [1.66, 1.74, 0.14],
-        [2.16, 2.17, 0.55],
-        [2.17, 2.32, 0.18],
-        [2.32, 2.33, 0.48],
-        [2.51, 2.52, 0.12],
-        [2.55, 2.57, 0.22],
-    ];
+    const RING_INNER = 1.6, RING_OUTER = 2.65, RANGE = RING_OUTER - RING_INNER;
+    const bands = [ [ 1.66, 1.74, .14 ], [ 2.16, 2.17, .55 ], [ 2.17, 2.32, .18 ], [ 2.32, 2.33, .48 ], [ 2.51, 2.52, .12 ], [ 2.55, 2.57, .22 ] ];
     for (const [r0, r1, a] of bands) {
         const v0 = (r0 - RING_INNER) / RANGE;
         const v1 = (r1 - RING_INNER) / RANGE;
         const y0 = (1 - v1) * h, y1 = (1 - v0) * h;
         const g = ctx.createLinearGradient(0, y0, 0, y1);
-        g.addColorStop(0,   'rgba(180,170,160,0)');
-        g.addColorStop(0.5, `rgba(180,170,160,${a})`);
-        g.addColorStop(1,   'rgba(180,170,160,0)');
+        g.addColorStop(0, "rgba(180,170,160,0)");
+        g.addColorStop(.5, `rgba(180,170,160,${a})`);
+        g.addColorStop(1, "rgba(180,170,160,0)");
         ctx.fillStyle = g;
         ctx.fillRect(0, y0, w, y1 - y0);
     }
     const adamsV0 = (2.54 - RING_INNER) / RANGE;
     const adamsV1 = (2.58 - RING_INNER) / RANGE;
-    const arcY = (1 - (adamsV0 + adamsV1) * 0.5) * h;
+    const arcY = (1 - (adamsV0 + adamsV1) * .5) * h;
     const arcHeight = Math.max(3, (adamsV1 - adamsV0) * h * 2.4);
-    const arcs = [
-        [0.470, 0.045, 0.95],
-        [0.505, 0.030, 0.72],
-        [0.545, 0.036, 0.88],
-        [0.590, 0.026, 0.64],
-        [0.632, 0.040, 0.80],
-    ];
+    const arcs = [ [ .47, .045, .95 ], [ .505, .03, .72 ], [ .545, .036, .88 ], [ .59, .026, .64 ], [ .632, .04, .8 ] ];
     ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalCompositeOperation = "lighter";
     for (const [u, halfWidth, alpha] of arcs) {
         const cx = u * w, rx = Math.max(2, halfWidth * w);
         const g = ctx.createRadialGradient(cx, arcY, 0, cx, arcY, rx);
         g.addColorStop(0, `rgba(190,182,172,${alpha})`);
-        g.addColorStop(0.55, `rgba(190,182,172,${alpha * 0.45})`);
-        g.addColorStop(1, 'rgba(190,182,172,0)');
+        g.addColorStop(.55, `rgba(190,182,172,${alpha * .45})`);
+        g.addColorStop(1, "rgba(190,182,172,0)");
         ctx.fillStyle = g;
         ctx.beginPath();
         ctx.ellipse(cx, arcY, rx, arcHeight, 0, 0, Math.PI * 2);
@@ -260,23 +517,10 @@ function drawNeptuneRingTexture(ctx, w, h) {
     }
     ctx.restore();
 }
+
 function drawSaturnRingTexture(ctx, w, h) {
     ctx.clearRect(0, 0, w, h);
-    const bands = [
-        [0.00, 0.00],
-        [0.10, 0.85],
-        [0.20, 0.35],
-        [0.25, 0.95],
-        [0.35, 0.45],
-        [0.40, 1.00],
-        [0.50, 0.70],
-        [0.55, 0.90],
-        [0.65, 0.35],
-        [0.70, 0.80],
-        [0.80, 0.55],
-        [0.90, 0.20],
-        [1.00, 0.05],
-    ];
+    const bands = [ [ 0, 0 ], [ .1, .85 ], [ .2, .35 ], [ .25, .95 ], [ .35, .45 ], [ .4, 1 ], [ .5, .7 ], [ .55, .9 ], [ .65, .35 ], [ .7, .8 ], [ .8, .55 ], [ .9, .2 ], [ 1, .05 ] ];
     for (let i = 0; i < bands.length - 1; i++) {
         const [p1, v1] = bands[i];
         const [p2, v2] = bands[i + 1];
@@ -289,15 +533,16 @@ function drawSaturnRingTexture(ctx, w, h) {
     }
     for (let i = 0; i < 60; i++) {
         const y = Math.random() * h;
-        ctx.fillStyle = `rgba(0,0,0,${0.05 + Math.random() * 0.15})`;
+        ctx.fillStyle = `rgba(0,0,0,${.05 + Math.random() * .15})`;
         ctx.fillRect(0, y, w, 1 + Math.random() * 2);
     }
 }
+
 function getProceduralTexture(key) {
     if (!proceduralTextures[key]) {
         const drawFn = proceduralDrawFns[key];
         const tex = createCanvasTexture(512, 256, drawFn);
-        if (key === 'saturn-ring') {
+        if (key === "saturn-ring") {
             tex.wrapS = THREE.ClampToEdgeWrapping;
             tex.wrapT = THREE.ClampToEdgeWrapping;
         }
@@ -305,9 +550,10 @@ function getProceduralTexture(key) {
     }
     return proceduralTextures[key];
 }
+
 function createEarthNightLights() {
-    if (!earthNightTexture || !objectRegistry['earth']) return;
-    const earth = objectRegistry['earth'];
+    if (!earthNightTexture || !objectRegistry["earth"]) return;
+    const earth = objectRegistry["earth"];
     if (earth.userData.nightMesh) {
         const old = earth.userData.nightMesh;
         earth.remove(old);
@@ -315,49 +561,62 @@ function createEarthNightLights() {
         old.material.dispose();
         earth.userData.nightMesh = null;
     }
-    const radius = earth.geometry.parameters.radius * 1.0005;
-    const geometry = BodyShapes.createGeometry(THREE, 'earth', radius, 256, 256);
+    const cloudMap = cloudMeshes["earth"]?.material?.map || null;
+    const radius = earth.geometry.parameters.radius * (1 + 10 / BodyShapes.maxRadiusKm("earth"));
+    const geometry = BodyShapes.createGeometry(THREE, "earth", radius, 512, 256);
     const material = new THREE.ShaderMaterial({
         uniforms: {
-            nightTexture: { value: earthNightTexture },
-            sunDirection: { value: new THREE.Vector3(0, 0, 0) },
+            dayTexture: {
+                value: earth.material?.map || null
+            },
+            dayTextureMatrix: {
+                value: earth.material?.map?.matrix?.clone?.() || new THREE.Matrix3
+            },
+            hasDayTexture: {
+                value: earth.material?.map ? 1 : 0
+            },
+            cloudTexture: {
+                value: cloudMap
+            },
+            cloudTextureMatrix: {
+                value: cloudMap?.matrix?.clone?.() || new THREE.Matrix3
+            },
+            hasCloudTexture: {
+                value: cloudMap ? 1 : 0
+            },
+            cloudUseAlpha: {
+                value: cloudMap?.userData?.cloudMaskChannel === "alpha" ? 1 : 0
+            },
+            cloudMaskOpacity: {
+                value: 1
+            },
+            nightTexture: {
+                value: earthNightTexture
+            },
+            nightTextureMatrix: {
+                value: earthNightTexture.matrix.clone()
+            },
+            sunDirection: {
+                value: new THREE.Vector3(0, 0, 0)
+            },
+            uInsideShell: {
+                value: 0
+            }
         },
-        vertexShader: `
-            varying vec2 vUv;
-            varying vec3 vNormal;
-            varying vec3 vWorldPosition;
-            void main() {
-                vUv = uv;
-                vNormal = normalize(mat3(modelMatrix) * normal);
-                vec4 worldPos = modelMatrix * vec4(position, 1.0);
-                vWorldPosition = worldPos.xyz;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            }
-        `,
-        fragmentShader: `
-            uniform sampler2D nightTexture;
-            uniform vec3 sunDirection;
-            varying vec2 vUv;
-            varying vec3 vNormal;
-            varying vec3 vWorldPosition;
-            void main() {
-                vec3 lightDir = normalize(sunDirection);
-                float nightFactor = 1.0 - smoothstep(-0.10, 0.05, dot(normalize(vNormal), lightDir));
-                vec4 nightColor = texture2D(nightTexture, vUv);
-                float cityMask = smoothstep(0.001, 0.018, max(max(nightColor.r, nightColor.g), nightColor.b));
-                gl_FragColor = vec4(nightColor.rgb * 1.2, nightColor.a * nightFactor * cityMask);
-                #include <tonemapping_fragment>
-                ${THREE.ShaderChunk.colorspace_fragment ? '#include <colorspace_fragment>' : '#include <encodings_fragment>'}
-            }
-        `,
+        vertexShader: `\n            ${globalThis.LDB_VERTEX_PARS || ""}\n            varying vec2 vUv;\n            varying vec3 vNormal;\n            void main() {\n                vUv = uv;\n                vNormal = normalize(mat3(modelMatrix) * normal);\n                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);\n                ${globalThis.LDB_VERTEX_TAIL || ""}\n            }\n        `,
+        fragmentShader: `\n            uniform sampler2D dayTexture;\n            uniform mat3 dayTextureMatrix;\n            uniform float hasDayTexture;\n            uniform sampler2D nightTexture;\n            uniform mat3 nightTextureMatrix;\n            uniform sampler2D cloudTexture;\n            uniform mat3 cloudTextureMatrix;\n            uniform float hasCloudTexture;\n            uniform float cloudUseAlpha;\n            uniform float cloudMaskOpacity;\n            uniform vec3 sunDirection;\n            uniform float uInsideShell;\n            varying vec2 vUv;\n            varying vec3 vNormal;\n            ${globalThis.LDB_FRAGMENT_PARS || ""}\n            void main() {\n                ${globalThis.LDB_FRAGMENT_HEAD || ""}\n                if ((uInsideShell < 0.5 && !gl_FrontFacing) || (uInsideShell >= 0.5 && gl_FrontFacing)) discard;\n                float mu = dot(normalize(vNormal), normalize(sunDirection));\n                float nightFactor = 1.0 - smoothstep(-0.12, 0.14, mu);\n                vec2 dayUv = (dayTextureMatrix * vec3(vUv, 1.0)).xy;\n                vec2 nightUv = (nightTextureMatrix * vec3(vUv, 1.0)).xy;\n                float cloudOcclusion = 0.0;\n                if (hasCloudTexture > 0.5 && cloudMaskOpacity > 0.001) {\n                    vec2 cloudUv = (cloudTextureMatrix * vec3(vUv, 1.0)).xy;\n                    vec4 cloudSample = texture2D(cloudTexture, cloudUv);\n                    float cloudRgb = max(cloudSample.r, max(cloudSample.g, cloudSample.b));\n                    float cloudDensity = mix(cloudRgb, cloudSample.a, cloudUseAlpha);\n                    float coverage = smoothstep(0.38, 0.60, cloudDensity) * cloudMaskOpacity;\n                    cloudOcclusion = smoothstep(0.02, 0.18, coverage);\n                }\n                float clearFactor = 1.0 - cloudOcclusion;\n                vec3 dayColor = hasDayTexture > 0.5 ? texture2D(dayTexture, dayUv).rgb : vec3(0.0);\n                vec3 nightColor = texture2D(nightTexture, nightUv).rgb;\n                vec3 citySignal = max(nightColor - vec3(0.02), vec3(0.0));\n                float cityLevel = max(max(citySignal.r, citySignal.g), citySignal.b);\n                float cityMask = smoothstep(0.008, 0.03, cityLevel);\n                // Keep the unlit land/ocean close to black; bright terrain bleed makes the
+                // night hemisphere look self-illuminated instead of showing only faint earthshine.
+                vec3 surfaceGlow = dayColor * vec3(0.018, 0.024, 0.040) + vec3(0.00025, 0.00040, 0.00080);\n                vec3 cityGlow = pow(citySignal, vec3(0.82)) * vec3(1.45, 1.05, 0.68) * cityMask;\n                gl_FragColor = vec4(surfaceGlow + cityGlow, nightFactor * 0.9 * clearFactor);\n                #include <tonemapping_fragment>\n                ${THREE.ShaderChunk.colorspace_fragment ? "#include <colorspace_fragment>" : "#include <encodings_fragment>"}\n            }\n        `,
         transparent: true,
+        depthTest: true,
         depthWrite: false,
-        side: THREE.FrontSide,
+        side: THREE.DoubleSide,
+        forceSinglePass: true
     });
-    material.blending = THREE.AdditiveBlending;
+    material.blending = THREE.NormalBlending;
     const nightMesh = new THREE.Mesh(geometry, material);
     nightMesh.userData.isNightLights = true;
-    nightMesh.renderOrder = 1;
+    nightMesh.renderOrder = -1;
     earth.add(nightMesh);
     earth.userData.nightMesh = nightMesh;
 }

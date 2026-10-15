@@ -155,14 +155,19 @@ have finite limits.
 - **Right-drag** orbits around the current pivot without repositioning the
   camera when the drag starts. If the pivot is already at a focused planet's
   centre, it follows that planet; after a left-drag, it keeps the moved pivot.
-- **W/A/S/D** move relative to the camera's view. While landed, movement follows
-  the rendered surface at a capped 1.4 m/s; near a focused planet or Moon but
-  not landed, it is capped at 1.4 m/s. Interplanetary flight remains faster.
+- **W/S** dolly smoothly toward/away from the current camera pivot, matching the
+  direction of wheel zoom; **A/D** strafe sideways. WASD or left-drag detaches
+  free-flight movement from the focused body's orbital follow; wheel zoom keeps
+  the current focus centered. While landed,
+  WASD instead walks across the rendered surface, maintaining eye clearance at a
+  capped 1.4 m/s.
 - **Q/E** roll counter-clockwise/clockwise.
-- Select a planet or the Moon, then press **L** to approach and settle at a
-  near-surface tangent view, with the eye positioned about 1.7 m above the
-  rendered surface. While landed, WASD continues to move tangent to the
-  rendered surface, left-drag still aims, and the wheel adjusts height.
+- **Scroll toward a focused landable planet or Moon** to approach it; within
+  near-orbit range, the camera smoothly settles into a near-surface tangent view
+  without requiring a key press. **L** remains available as an immediate landing
+  shortcut. The eye settles about 1.7 m above the rendered surface. While landed,
+  WASD walks tangent to the surface, left-drag still aims, and the wheel adjusts
+  height.
   Press **Escape** to pull back to orbit; Escape outside landing mode unfocuses
   or returns to the system overview.
 - Mouse wheel and `-` / `+` zoom. Selecting a body uses a smooth camera flight.
@@ -282,13 +287,31 @@ The scene includes all eight planets, Earth's Moon, supported major satellite
 sets, Pluto and Charon, and additional objects such as Himalia and Phoebe where
 the appropriate model is available.
 
-- **Earth:** day/night materials, city lights, clouds, cloud-shadow and eclipse
-  effects, atmosphere rendering, and illustrative lightning at a fixed set of
-  storm-prone regions. Jupiter and Saturn likewise use stable regional storm
-  bands rather than whole-globe random flash locations.
-- **Venus:** a surface/atmosphere presentation with a focus control to reveal the
-  surface. Surface maps and atmospheric appearance are visualization inputs,
-  not a live visible-light view through the clouds.
+- **Earth:** the supplied day and city-light KTX2 maps, sunlit clouds, a subdued,
+  density- and view-shaded cloud-only night-side visibility layer, cloud-shadow
+  and eclipse effects (cloud shadows are enabled at Medium/High graphics quality
+  and disabled at Low), a layered scattering atmosphere, and 3D lightning effects
+  randomized within storm-prone regions. Hotspot seeds, strike coordinates,
+  patch sizes, and short event cooldowns are varied per session. The denser, icy-white cloud shell
+  occludes direct city lights under cloudy pixels, while a soft warm city-light
+  bloom is projected onto the softly scattering cloud cover. Lightning is gated
+  per fragment against the cloud-mask texture, including GPU-only KTX2 maps, so
+  strikes stay with cloud-covered regions; they create a compact white/violet
+  cloud-top pool, a thin violet-white channel and faint high-altitude
+  pink/magenta sprite streamers. Earth’s widened cloud deck is a 2–16 km
+  volumetric layer, ray-marched from above or below so landed cameras can see its
+  underside. Full-daylight lightning is strongly attenuated. Earth schedules a
+  nominal 40 randomized strikes per simulated second at 1×, scaling with the
+  simulation rate. Lightning can be toggled in Earth's focus card; reduced
+  motion disables it by default but allows it to be turned back on explicitly.
+  Jupiter, Saturn, Uranus, Neptune, Venus, and Mars use sparse planet-specific
+  discharge models rather than whole-globe random flashes; evidence confidence
+  varies by world.
+- **Venus:** pale ivory-white cloud tops are represented by a subtly banded,
+  procedural upper-cloud deck at about 70 km, with near-neutral visible-light
+  atmospheric scattering. The deck sits above and hides the underlying terrain
+  while the Venus **Atmosphere** toggle is on; it is a visual approximation, not
+  live cloud/weather data or a measured surface albedo map.
 - **Saturn:** textured rings with band/gap structure and mutual ring/planet
   shadows. The rings receive the planet's eclipse shadow, so the section behind
   Saturn reads genuinely black, and the shading follows the ring's own density, so
@@ -313,19 +336,51 @@ measured accurately at the selected instant.
 
 ### Elevation data and surface grid
 
-The runtime elevation catalog applies global topography to **Earth (NOAA ETOPO1),
-Mercury (MESSENGER), Venus (Magellan), Mars (MOLA), and the Moon (LOLA)**. The
-source maps are resampled to 2048 × 1024 grids for rendering; this is lower
-resolution than several native source products. Relief is exaggerated 20× for visibility, with bump mapping and hypsometric
-contrast from the same 16-bit grids; this deliberately strong presentation boost
-is not a scientific elevation scale. Vertical
-datums and conversions are recorded in `data/elevation/catalog.json`, with the
-reproducible builder in
-`tools/build_elevation_catalog.py`. For Mars, the PDS MEGDR label identifies the
-product datum as the GMM3 (mgm1025) degree/order 50 areoid; cells without
-observations are interpolated in the supplied MEGDR, and the source height is
-applied radially without an areoid-to-ellipsoid correction. Other planets and
-moons retain their reference shapes; no global DEM is fabricated for them.
+The runtime catalog now bundles global elevation grids for **Earth (NOAA
+ETOPO5), Mercury (MESSENGER/USGS), Venus (Magellan/USGS), Mars (MOLA/PDS), and
+the Moon (LOLA/NASA)**. The source project contained the loader but not the
+catalog or raster files, so its DEM path could not load any terrain. The
+supplied NASA reference is a compiled web bundle; its near-surface path uses a
+spheroid LOD component and streamed terrain tiles. Solister uses an adapted
+offline approach: one global DEM per body, a 256 × 128 base sphere, and a
+512 × 256 close-approach relief mesh prepared asynchronously and cached before
+activation. A staged, body-relative landing holds at an approach waypoint until
+terrain preparation is ready, then eases through the final descent. Detail
+activation uses camera-distance hysteresis, including prewarming before the
+landing stage; this is a single-resolution mesh, not streamed per-tile LOD.
+
+Source grids are bilinearly resampled to 2048 × 1024 little-endian 16-bit
+height rasters. The full 16-bit data displaces the CPU mesh and drives the
+landing/collision surface sampler; vertex normals are recomputed after
+displacement, and a WebGL-safe 8-bit bump texture adds fragment-scale,
+height-derived normal detail. The GPU texture uses a sized single-channel format
+and one linear-filtered level (no mipmap generation). Relief and bump scale
+remain at **1× vertical exaggeration**; there is no synthetic hypsometric color
+contrast. The 512 × 256 close-approach mesh and source rasters are still
+coarser than native terrain products and do not provide NASA-style per-tile
+LOD.
+
+`data/elevation/catalog.json` records source URLs, resolution, encoding range,
+vertical datum, and limitations. Earth ETOPO5 is five-arc-minute global relief;
+Earth's mean-sea-level values are applied radially without a local geoid-to-
+ellipsoid correction. Mars MOLA heights are above the GMM3 areoid and likewise
+do not include a local areoid-to-ellipsoid correction. Other bodies retain their
+reference shapes; no DEM is fabricated for them.
+
+The reproducible builder is `tools/build_elevation_catalog.py`. To download the
+source products and regenerate the bundled runtime grids from the project root,
+install NumPy and tifffile and run:
+
+```sh
+python3 -m pip install numpy tifffile
+python3 tools/build_elevation_catalog.py
+```
+
+The builder reuses or downloads its source files in `.cache/elevation-sources/`
+(about 650 MB total, including the high-resolution Mercury source) and writes
+the five compact `.u16` grids and updated catalog to `data/elevation/`. The app
+expects those little-endian 2048 × 1024 runtime grids; raw GeoTIFFs and PDS
+`.IMG` files are not loaded directly by the browser.
 
 A **Surface Grid** can be enabled while Mercury, Venus, Earth, Mars, the Moon,
 Jupiter, Saturn, Uranus, Neptune, or Pluto is focused. Its toggle is in the
@@ -366,48 +421,118 @@ contact times, ground tracks, or visibility at a real observing site.
 
 ### Sun
 
-The Sun keeps a neutral-white, procedurally granulated photosphere with a bright
-white centre. A sphere-attached layer adds 1,600 randomly distributed white flecks,
-streaks, and tapered spikes with varied physical lengths, widths, and brightness.
-Their physical sizes are fixed in solar-radius units (ordinary perspective still
-applies), while their emission responds smoothly to camera distance.
+The photosphere is a featureless, unlit **pure-white sphere**—there are no marks,
+spikes, or protrusions on its surface. A separate analytic billboard draws one
+intense, smooth glow with a soft exponential falloff. Its radius and gain increase
+with camera distance; at close range it stays at least 1.35 times the apparent
+solar radius, with the physical corona shell held at 1.14 times photospheric
+radius. Depth testing lets foreground bodies occlude the glow; the photosphere
+itself remains unchanged.
 
 The analytic corona integrates its power-law radial column in **closed form**
 (no march loop), rolls off with a soft knee, self-extinguishes with a
 Beer–Lambert term, and fades smoothly at the shell edge. A broader additive halo
 joins the photosphere without a visible rim; both corona and halo grow brighter
-with distance. Fine, low-intensity lens ghosts and streaks move along the
-Sun-to-screen-centre axis as the camera moves, providing subtle parallax.
+with distance. Texture-backed lens ghosts and streaks from the supplied flare
+pack move along the Sun-to-screen-centre axis as the camera moves, providing
+subtle parallax without putting marks or spikes on the photosphere.
 
-The photosphere uses procedural granulation, but there is no measured
-active-region, filament, prominence, or loop reconstruction. These visual
-effects are illustrative and are not an eye-safe representation of looking at
-the real Sun.
+The corona and lens artifacts are illustrative effects, not measured
+active-region, filament, prominence, or loop reconstructions, and are not an
+eye-safe representation of looking at the real Sun.
 
-### Atmospheres
+### Atmospheres and electrical activity
 
-Bodies that possess a real atmosphere no longer wear a corona glow shell. They
-get a light-scattering atmosphere instead: Rayleigh + Mie **single scattering**
-with Beer–Lambert extinction along both the view ray and the sun ray,
-Rayleigh/Henyey–Greenstein phase functions, an isotropic multiple-scattering
-approximation, and — where they matter — ozone (Earth) and methane
-(Uranus/Neptune) absorption bands. Earth additionally receives lunar-eclipse
-shadowing on its atmosphere.
+Atmosphere-bearing bodies use a **ray-marched 3D scattering volume**, not a
+camera-facing glow. The shader separately evaluates Rayleigh and Mie density,
+with independent scale heights, and distinguishes Mie scattering from Mie
+extinction. Earth, Venus, and Mars also receive a separate, camera-altitude-
+blended ground aerial-perspective hook on their surface materials, using five
+density samples along the camera-to-surface path. The shell atmosphere is
+attenuated during the close-ground blend so both treatments do not simply stack
+at full strength. Supplied SpaceEngine columns are integrated as a single continuous
+profile from the reference surface to the supplied top altitude; the shader no
+longer introduces arbitrary equal-height internal bands. Project-authored
+multi-layer profiles retain their source optical depths and cross-fade adjacent
+density fields at layer boundaries. Ray intersections and local altitude use
+each body's reference-ellipsoid axes, keeping the scattering volume aligned to
+the solid body. Earth additionally receives lunar-eclipse shadowing. Outside the
+shell, the volume depth-tests normally; inside it, the shader marches to the
+analytic body-surface intersection and the shell pass bypasses opaque-ground
+depth testing so the close-approach haze does not vanish at entry.
 
-The physical database (composition, pressure, temperature, and gravity) derives
-mixture molar mass, scale height `H = R·T/(M̄·g)`, relative molecular
-Rayleigh strength from refractivity/King factors, and vertical optical depth
-from the hydrostatic column `N = P/(m·g)`. Aerosol/Mie settings, absorber
-profiles, and per-body visual gains are tuned inputs, not measurements or a
-complete first-principles atmosphere model. Bodies without a real atmosphere
-(Mercury, the Moon, …) get no scattering shell; their distant presentation is
-carried by the glow marker.
+SpaceEngine documents these as precomputed atmosphere models described by
+`atmospheres.cfg` in its [planet-creation manual](https://spaceengine.org/manual/making-addons/creating-a-planet/).
+The supplied standard profiles now drive rendered scattering for Earth, Venus,
+Mars, Jupiter, Titan, Neptune, and Pluto. Earth, Venus, Mars,
+and Pluto use values cross-checked between the supplied binary `.atm` files
+(`.atm.txt` attachments) and `atmospheres.cfg.txt`; Jupiter, Titan, and Neptune
+use the active standard entries in the supplied configuration. The renderer
+applies the configured coefficient scale factors to the RGB Rayleigh, Mie
+scattering, and Mie extinction coefficients, along with each model’s separate
+Rayleigh/Mie scale heights and Mie anisotropy. The first 15 little-endian
+float32 header values of the four binary files agree with those parameters to
+float32 precision. The remaining binary payload has not been decoded or loaded,
+so this is a parameter-based volumetric implementation, **not a claim of direct
+SpaceEngine LUT import**. `MieFade` is preserved as source metadata, but its
+binary semantics were not established and it is not applied as an invented
+shader control.
 
-The march uses a fixed small sample count and a closed-form grazing-corrected
-slant factor instead of a nested sun loop, so the cost stays a handful of ALU
-ops per fragment — no extra render passes, no per-frame CPU work beyond two
-vector uniforms per visible shell. Clouds, lightning, and weather remain
-stylized layers and are not historical meteorological reconstructions.
+The supplied configuration has no active standard Saturn or Uranus preset, so
+those bodies retain Solister’s project-authored layered profiles. The
+project-authored gas, pressure, temperature, and altitude layers also remain the
+input to the illustrative lightning system. Mercury’s exosphere has negligible
+visible scattering; the Moon has no atmosphere shell. The Earth profile used by
+the volumetric renderer is the supplied 60 km SpaceEngine column; the separate
+storm/event model keeps its own atmospheric layer facts for visual placement.
+
+Solar direction follows the Sun-to-body vector each frame, and direct
+scattering brightness varies approximately with inverse-square solar irradiance
+relative to Earth. SpaceEngine’s supplied atmosphere files specify scattering
+profiles, not discharge locations, lightning rates, or storm forecasts; no
+lightning dataset was included. Lightning is drawn as a session-randomized,
+procedural-cloud-mask-conditioned visual approximation within illustrative
+storm-prone regions. Its visible ribbons are presentation effects, not a
+validated weather model. Earth clouds use a separate night-side visibility
+layer shaded by cloud density and viewing angle. The cloud volume is denser and
+uses a cool-white diffuse-scattering approximation for a softly frosted look.
+The city-light texture is suppressed beneath cloudy pixels and sampled for a
+soft, localized amber glow on the clouds; this is an illustrative lighting
+effect, not a model of real cloud radiative transfer. Earth lightning adds a
+short-lived, center-fading white/violet cloud-top flash, a narrow violet-white
+channel that rises above the deck, and faint high-altitude pink/magenta sprite
+streamers. Daylight attenuates the effect. The nominal event
+rate is 40 strikes per simulated second at 1× and scales with simulation speed.
+The supplied flare archive contains lens-artifact
+sprites/configuration, not lightning data.
+Events are not forecasts or reconstructions of weather at a selected date:
+the app has no live global convection, aerosol, or electric-field data. Earth
+has a cloud-only night-side visibility layer; it samples the cloud and city-light
+maps, hides direct city lights beneath modeled cloud cover, and adds an amber
+cloud-top glow. Lightning has been observed
+on Earth, Jupiter, Saturn, and Neptune. Venus’ Earth-like lightning remains
+disputed; the 2026 MAVEN whistler result is a rare indication of lightning-like
+electrical activity on Mars, with event location and rate still unresolved.
+Uranus’ activity is also uncertain, so speculative effects are deliberately
+rare. See NASA’s [lightning across the Solar System](https://science.nasa.gov/science-research/planetary-science/lightning-across-the-solar-system/)
+summary and the 2026 [MAVEN whistler study](https://www.science.org/doi/10.1126/sciadv.aeb4898)
+for evidence context.
+
+Custom atmosphere, night-light, and cloud shaders now follow Three.js log-depth
+handling on both WebGL2 and the WebGL1 fragment-depth-extension path, keeping
+transparent shells depth-aligned with opaque bodies. The shader normally uses an 8-sample view march, reduced to five samples for
+inside-shell or near-ground views, with compile-time-specialized layer loops;
+it omits ozone/methane calculations for profiles that do not use them. It
+cross-fades authored layer boundaries, tracks view-path transmittance, and uses
+a grazing-corrected sunlight slant estimate instead of a nested sun march. It
+adds no render pass and performs no per-frame CPU layer integration;
+body-center, body-local ellipsoid basis, solar direction, and relative solar
+irradiance are updated per visible shell. See
+`src/data/spaceengine-atmosphere-models.js` for
+the translated standard-profile inputs. NASA’s [planetary atmosphere
+overview](https://science.nasa.gov/solar-system/10-things-planetary-atmospheres/)
+and [Earth atmospheric-layer guide](https://science.nasa.gov/earth/earth-atmosphere/earths-atmosphere-a-multi-layered-cake/)
+provide general context, not model-specific parameter values.
 
 ## Comets
 
@@ -486,8 +611,12 @@ Comets remain independent, and there is no separate **Ring Rocks** menu item.
 
 ## Sky
 
-The constellation-oriented catalogue contains **8,790 star records** in the
-supplied dataset. Catalogue stars are always visible; there is no star-layer
+When its data modules are present, the constellation-oriented catalogue
+contains **8,790 star records**. The uploaded source snapshot omits the three
+`data/sky/` catalogue modules, so guarded imports disable the constellation
+layer cleanly (with a console warning) instead of failing the app or inventing
+replacement data. Restore those source datasets to enable the full sky layer.
+With the catalogue present, stars are always visible; there is no star-layer
 toggle, while constellation figures, boundaries, and names remain separately
 controlled. Each physical catalog-star disc is projected from its angular
 diameter, `2 atan(R_km / (d_pc × 3.085677581e13 km))`, using the active camera
@@ -539,10 +668,39 @@ positions or constellation appearance.
 
 ## Textures and visual effects
 
-Texture assets use resolution variants under `assets/textures/`, including KTX2
-maps where supplied. The texture pipeline uses manifests, request management,
-and procedural fallbacks to reduce missing-map requests and keep supported
-visuals usable while assets load.
+Texture assets use resolution variants under `assets/textures/`, including the
+original KTX2 maps where supplied. The texture pipeline uses manifests, request
+management, and resolution fallbacks for missing variants.
+
+Earth day and night maps use the original supplied KTX2 assets
+(`earth_day.ktx2` and `earth_night.ktx2`) in their resolution folders. They are
+installed byte-for-byte: day and night at 2K and 4K, day at 8K, and the supplied
+8K night map unchanged. The KTX2 files use 2:1 equirectangular dimensions,
+UASTC data, Zstandard supercompression, sRGB transfer metadata, and no
+`KTXorientation` entry. The day and night color maps are sampled as sRGB, while
+the cloud-coverage mask remains linear data; this keeps gamma-encoded near-black
+night-map values from being mistaken for city lights. The day/cloud transform
+retains its quarter-turn in longitude and vertical flip. The night map now has
+its own UV matrix with the same longitude correction and an independently
+reversed vertical transform,
+following the in-scene report that the previously shared transform rendered the
+night map upside down. The night layer uses the night map for warm, localized
+city emissions and keeps the underlying dark surface near-black, with only a
+faint cool earthshine hint. Direct city-light emission is masked under the
+cloud-coverage map; the cloud-only night shader samples the city map for a soft
+localized amber bloom and retains density- and view-dependent shading. The cloud
+shell uses a cool-white scattering approximation for a softly frosted appearance.
+Lightning briefly brightens a compact cloud area with a center-to-edge falloff,
+a white/violet core and separate high-altitude pink streamers. A final WebGL visual comparison
+of the corrected night-map orientation remains pending. Manifests
+register every supplied map at its actual resolution.
+Missing maps are not silently replaced with unrelated images. A stable,
+broadened-coverage procedural Earth cloud map fills in because no original Earth
+cloud KTX2 map is bundled. Its widened 2–16 km shell is rendered
+volumetrically from both sides, including underneath for landed views; its
+night-side visibility layer uses the city-light texture for illustrative cloud-top
+bloom; it is not a weather forecast. Source/asset status and credits are in
+`License/textures/NOTICE-TEXTURES.md`.
 
 A visual fallback is not an ephemeris fallback: a procedural surface cannot
 replace a missing position table. Missing scientific data may make a body
@@ -616,13 +774,15 @@ Defaults are **Asteroids off**, **Catalogue Stars always on**, **48 FPS**, and
 
 ### Keyboard shortcuts
 
-| Key | Action |
+| Input | Action |
 | --- | --- |
 | Space | Pause/resume |
 | H | Hide/show the dock |
-| W / A / S / D | Move the camera |
+| W / S | Dolly in/out like the mouse wheel (walk forward/back while landed) |
+| A / D | Strafe sideways (walk across the surface while landed) |
 | Q / E | Roll counter-clockwise / clockwise |
-| L | Land on the focused or last-focused planet or Moon |
+| Mouse wheel | Zoom; scroll close to land; adjust height while landed |
+| L | Land immediately on the focused or last-focused planet or Moon |
 | T | Toggle asteroid populations |
 | C | Stop camera motion |
 | M | Mute/unmute |
@@ -655,6 +815,7 @@ not hardcoded here: they change with releases and asset packages.
 | `src/sim/` | Theory/runtime helpers, interpolation curves, path history, trails, approximate orbit propagation |
 | `src/render/` | Texture pipeline, procedural textures, HDR and camera-motion effects |
 | `src/shaders/` | Eclipse, atmosphere, and shadow shader integrations |
+| `src/data/` | Translated SpaceEngine standard-atmosphere parameters used by the volumetric shader |
 | `src/ui/`, `src/systems/` | Dock, focus/navigation, input, camera and supporting interfaces |
 | `src/sky/` | Sky maps, constellation rendering and sky controls |
 | `data/` | Numerical tables, metadata, catalogues, validation/provenance and reference material |
@@ -675,9 +836,12 @@ coverage guards.
 ## Performance
 
 Graphics tiers change selected texture sizes, shader detail, draw ranges, label
-refresh intervals, and pixel-ratio targets. Expensive effects and high-resolution
-textures still require suitable hardware; Low does not guarantee that every
-feature runs at a fixed FPS on every integrated GPU.
+refresh intervals, and pixel-ratio targets. The separate Performance selector
+caps rendering at 30 fps with a 2560 × 1440 render-pixel budget in Balanced, or
+allows up to 60 fps without that pixel-budget cap in Full; the lower of the
+selected FPS preference and profile cap is used. Expensive effects and
+high-resolution textures still require suitable hardware; these caps do not
+guarantee a fixed FPS on every integrated GPU.
 
 Implemented techniques include:
 
@@ -690,16 +854,31 @@ Implemented techniques include:
   applicable.
 - Trail level of detail: fewer ribbon segments and reduced glow as more paths
   are visible.
-- Scratch-vector reuse, cached DOM writes, and independently throttled UI work
-  in relevant paths. This is not a claim of zero allocations in every frame.
+- Scratch-vector reuse, cached DOM writes, pooled label-layout data, a 30 fps
+  CSS-label update ceiling, and reduced per-frame allocations in selected
+  systems. This is not a claim of zero allocations in every frame.
+- Camera-frustum rejection for atmospheric weather and gas-giant storm updates;
+  Earth lightning events are selected from camera-facing regions, while its
+  cloud-mask gate and simulation-rate-aware flash scheduling remain in place.
+- Frustum-cullable orbit and trail lines with explicit/dynamic bounds; standard
+  realistic orbit tessellation is 2,048 segments instead of 65,536.
+- A lower ring-particle buffer ceiling; low/medium population draw counts are
+  preserved while the highest tier stores fewer points.
 - Texture request management, reuse and disposal during changes, with separate
   focus/sky texture considerations.
 - Camera near-plane adjustment and collision handling for supported bodies.
+- An eight-step cap on normal atmosphere view marches, reduced to five near the
+  ground or inside a shell, plus up to six Earth cloud-volume samples (reduced
+  to three or one for smaller projected views and one to three in ground mode).
+- Asynchronous 512 × 256 close-approach DEM preparation, terrain-readiness
+  gating during landing, and hysteretic detail activation. Near-ground mode
+  lowers the renderer pixel-ratio cap to 78% of the selected quality cap.
 
-The FPS cap is a target/limit, not a guarantee. Camera protection is not an
-exhaustive collision simulation of every instanced asteroid, ring particle, or
-transparent effect. Narrow-screen layout and extreme zooms should still be
-checked on the target browser/device.
+The FPS cap is a target/limit, not a guarantee; no browser/GPU timing benchmark
+is included for these code-level changes. Camera protection is not an exhaustive
+collision simulation of every instanced asteroid, ring particle, or transparent
+effect. Narrow-screen layout and extreme zooms should still be checked on the
+target browser/device.
 
 ## Platform integration
 
@@ -746,8 +925,9 @@ astronomical theories; remaining defects and simplified layers are possible.
 - General transparent-volume/ring occlusion and collisions have implementation
   limits.
 - No Oort cloud, galaxy-scale scene, or complete stellar survey is implemented.
-  Landing provides simple surface walking and clearance against the rendered
-  body mesh, not a terrain/rover simulation or mission-grade surface navigation.
+  Landed walking follows the rendered body mesh with a conservative bounding-
+  sphere fallback; it is not a terrain/rover simulation or mission-grade surface
+  navigation.
 
 These are scope choices and practical limits, not claims that broader features
 or better astronomical datasets are scientifically impossible.
@@ -804,8 +984,10 @@ clearance for every subsequent release or use.
   catalogue context. Trace the provenance of the actual star, figure, boundary
   and name files rather than assigning them all the HYG supplement's license.
 - **Solar System Scope:** the reported source of planet texture-pack assets,
-  distributed under **CC BY 4.0**. Retain attribution, source links and actual
-  modification information; exact local asset mapping still needs verification.
+  distributed under **CC BY 4.0**. User-supplied Earth day/night KTX2 maps are
+  included at 2K/4K/8K and copied byte-for-byte; their conversion history is not
+  independently established. Retain attribution/source links and map any other
+  original planet textures if supplied.
 - **NASA/Goddard SVS, Ernie Wright, and ESA/Gaia/DPAC:** the reported Milky Way
   source family corresponds to **Deep Star Maps 2020**. The exact local variant
   is unverified; other sky overlays need their own provenance checks.

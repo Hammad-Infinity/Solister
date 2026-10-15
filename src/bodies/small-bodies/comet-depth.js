@@ -1,25 +1,36 @@
-const sharedNuclei = new WeakMap();
+const sharedNuclei = new WeakMap;
 
 function createSharedDepth(THREE, nucleus) {
-    const scene = new THREE.Scene();
+    const scene = new THREE.Scene;
     const material = new THREE.ShaderMaterial({
-        uniforms: { range: { value: 1 } },
-        precision: 'highp',
-        vertexShader: `uniform float range;varying highp vec3 vView;
-            void main(){vec4 point=modelViewMatrix*vec4(position,1.0);vView=point.xyz/max(range,1e-20);gl_Position=projectionMatrix*point;}`,
-        fragmentShader: `#include <packing>
-            varying highp vec3 vView;
-            void main(){gl_FragColor=packDepthToRGBA(clamp(length(vView),0.0,0.99999));}`,
-        side: THREE.FrontSide, toneMapped: false, blending: THREE.NoBlending,
+        uniforms: {
+            range: {
+                value: 1
+            }
+        },
+        precision: "highp",
+        vertexShader: `uniform float range;varying highp vec3 vView;\n            void main(){vec4 point=modelViewMatrix*vec4(position,1.0);vView=point.xyz/max(range,1e-20);gl_Position=projectionMatrix*point;}`,
+        fragmentShader: `#include <packing>\n            varying highp vec3 vView;\n            void main(){gl_FragColor=packDepthToRGBA(clamp(length(vView),0.0,0.99999));}`,
+        side: THREE.FrontSide,
+        toneMapped: false,
+        blending: THREE.NoBlending
     });
     const proxy = new THREE.Mesh(nucleus.geometry, material);
     proxy.matrixAutoUpdate = false;
     proxy.frustumCulled = false;
     scene.add(proxy);
     return {
-        refs: 0, scene, material, proxy, records: new Map(),
-        eye: new THREE.Vector3(), center: new THREE.Vector3(), view: new THREE.Vector3(),
-        scale: new THREE.Vector3(), viewport: new THREE.Vector4(), clearColor: new THREE.Color(),
+        refs: 0,
+        scene: scene,
+        material: material,
+        proxy: proxy,
+        records: new Map,
+        eye: new THREE.Vector3,
+        center: new THREE.Vector3,
+        view: new THREE.Vector3,
+        scale: new THREE.Vector3,
+        viewport: new THREE.Vector4,
+        clearColor: new THREE.Color
     };
 }
 
@@ -27,16 +38,14 @@ function sameSignature(record, nucleus, camera, viewport) {
     let same = record.geometry === nucleus.geometry;
     const signature = record.signature;
     let index = 0;
-    for (const matrix of [camera.matrixWorldInverse, camera.projectionMatrix, nucleus.matrixWorld]) {
+    for (const matrix of [ camera.matrixWorldInverse, camera.projectionMatrix, nucleus.matrixWorld ]) {
         for (const value of matrix.elements) {
             if (signature[index] !== value) same = false;
             signature[index++] = value;
         }
     }
     const geometry = nucleus.geometry;
-    for (const value of [viewport.x, viewport.y, viewport.z, viewport.w,
-        geometry.attributes.position.version, geometry.index?.version ?? 0,
-        geometry.drawRange.start, geometry.drawRange.count]) {
+    for (const value of [ viewport.x, viewport.y, viewport.z, viewport.w, geometry.attributes.position.version, geometry.index?.version ?? 0, geometry.drawRange.start, geometry.drawRange.count ]) {
         if (signature[index] !== value) same = false;
         signature[index++] = value;
     }
@@ -49,7 +58,7 @@ function projectedAxis(position, depth, radius, scale, offset, size) {
     const spread = radius * Math.sqrt(Math.max(0, depth * depth + position * position - radius * radius));
     const minimum = scale * (position * depth - spread) / denominator - offset;
     const maximum = scale * (position * depth + spread) / denominator - offset;
-    return [(minimum * 0.5 + 0.5) * size, (maximum * 0.5 + 0.5) * size];
+    return [ (minimum * .5 + .5) * size, (maximum * .5 + .5) * size ];
 }
 
 export function createNucleusDepth(THREE, nucleus) {
@@ -69,20 +78,24 @@ export function createNucleusDepth(THREE, nucleus) {
             nucleus.getWorldScale(shared.scale);
             renderer.getCurrentViewport(shared.viewport);
             const viewport = shared.viewport;
-            const radius = (nucleus.geometry.boundingSphere?.radius ?? nucleus.geometry.parameters.radius) * Math.max(
-                Math.abs(shared.scale.x), Math.abs(shared.scale.y), Math.abs(shared.scale.z));
+            const radius = (nucleus.geometry.boundingSphere?.radius ?? nucleus.geometry.parameters.radius) * Math.max(Math.abs(shared.scale.x), Math.abs(shared.scale.y), Math.abs(shared.scale.z));
             const distance = shared.eye.distanceTo(shared.center);
-            if (radius * camera.projectionMatrix.elements[5] * viewport.w /
-                (2 * Math.max(distance - radius, 1e-15)) < 0.5) return null;
+            if (radius * camera.projectionMatrix.elements[5] * viewport.w / (2 * Math.max(distance - radius, 1e-15)) < .5) return null;
             let record = shared.records.get(renderer);
             if (!record) {
                 record = {
                     target: new THREE.WebGLRenderTarget(1, 1, {
-                        minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
-                        depthBuffer: true, stencilBuffer: false,
+                        minFilter: THREE.NearestFilter,
+                        magFilter: THREE.NearestFilter,
+                        depthBuffer: true,
+                        stencilBuffer: false
                     }),
-                    signature: new Float64Array(56).fill(NaN), geometry: null,
-                    viewport: new THREE.Vector4(), rangeWorld: 1, draws: 0, valid: false,
+                    signature: new Float64Array(56).fill(NaN),
+                    geometry: null,
+                    viewport: new THREE.Vector4,
+                    rangeWorld: 1,
+                    draws: 0,
+                    valid: false
                 };
                 shared.records.set(renderer, record);
             }
@@ -126,7 +139,7 @@ export function createNucleusDepth(THREE, nucleus) {
                 renderer.shadowMap.needsUpdate = false;
                 renderer.autoClear = false;
                 renderer.setRenderTarget(record.target);
-                renderer.setClearColor(0xffffff, 1);
+                renderer.setClearColor(16777215, 1);
                 renderer.clear();
                 renderer.render(shared.scene, camera);
                 record.texture = record.target.texture;
@@ -151,6 +164,6 @@ export function createNucleusDepth(THREE, nucleus) {
             for (const record of shared.records.values()) record.target.dispose();
             shared.records.clear();
             sharedNuclei.delete(nucleus);
-        },
+        }
     };
 }

@@ -1,13 +1,14 @@
 const TILE_PIXELS = 32;
-const SUPPORT = Math.sqrt(32 + 36) + 0.05;
-const RAY_SUPPORT = Math.sqrt(32) + 0.05;
+
+const SUPPORT = Math.sqrt(32 + 36) + .05;
+
+const RAY_SUPPORT = Math.sqrt(32) + .05;
 
 function perspectiveBounds(position, depth, variance, depthVariance, covariance, projection, offset, size) {
     const denominator = depth * depth - depthVariance;
     const center = position * depth + covariance;
     const spread = Math.sqrt(Math.max(0, center * center - denominator * (position * position - variance)));
-    return [((projection * (center - spread) / denominator - offset) * 0.5 + 0.5) * size,
-        ((projection * (center + spread) / denominator - offset) * 0.5 + 0.5) * size];
+    return [ ((projection * (center - spread) / denominator - offset) * .5 + .5) * size, ((projection * (center + spread) / denominator - offset) * .5 + .5) * size ];
 }
 
 export function createTailScreenMask(THREE, mesh, uniforms) {
@@ -16,42 +17,50 @@ export function createTailScreenMask(THREE, mesh, uniforms) {
     texture.magFilter = THREE.NearestFilter;
     texture.generateMipmaps = false;
     texture.needsUpdate = true;
-    uniforms.nodeMask = { value: texture };
-    uniforms.maskViewport = { value: new THREE.Vector4() };
-    uniforms.maskGrid = { value: new THREE.Vector3(1, 1, TILE_PIXELS) };
-    uniforms.screenMaskEnabled = { value: true };
-    uniforms.maskBits = { value: Float32Array.from({ length: 24 }, (_, index) => 2 ** (index % 8)) };
-    const viewport = new THREE.Vector4();
-    const matrix = new THREE.Matrix4();
-    const projectionMatrix = new THREE.Matrix4();
-    const frustum = new THREE.Frustum();
-    const center = new THREE.Vector3();
-    const sideCamera = new THREE.Vector3();
-    const upCamera = new THREE.Vector3();
-    const tangentCamera = new THREE.Vector3();
+    uniforms.nodeMask = {
+        value: texture
+    };
+    uniforms.maskViewport = {
+        value: new THREE.Vector4
+    };
+    uniforms.maskGrid = {
+        value: new THREE.Vector3(1, 1, TILE_PIXELS)
+    };
+    uniforms.screenMaskEnabled = {
+        value: true
+    };
+    uniforms.maskBits = {
+        value: Float32Array.from({
+            length: 24
+        }, (_, index) => 2 ** (index % 8))
+    };
+    const viewport = new THREE.Vector4;
+    const matrix = new THREE.Matrix4;
+    const projectionMatrix = new THREE.Matrix4;
+    const frustum = new THREE.Frustum;
+    const center = new THREE.Vector3;
+    const sideCamera = new THREE.Vector3;
+    const upCamera = new THREE.Vector3;
+    const tangentCamera = new THREE.Vector3;
     const signature = new Float64Array(53).fill(NaN);
     let width = 1, height = 1, disposed = false, integerMask = false;
     let scratch = new Uint8Array(4);
-
     function cameraAxis(output, input, scale) {
         const m = matrix.elements;
-        return output.set((m[0] * input.x + m[4] * input.y + m[8] * input.z) * scale,
-            (m[1] * input.x + m[5] * input.y + m[9] * input.z) * scale,
-            (m[2] * input.x + m[6] * input.y + m[10] * input.z) * scale);
+        return output.set((m[0] * input.x + m[4] * input.y + m[8] * input.z) * scale, (m[1] * input.x + m[5] * input.y + m[9] * input.z) * scale, (m[2] * input.x + m[6] * input.y + m[10] * input.z) * scale);
     }
-
     return {
         update(renderer, camera) {
             if (disposed) return;
             renderer.getCurrentViewport(viewport);
             let unchanged = true, index = 0;
-            for (const source of [camera.matrixWorldInverse, camera.projectionMatrix, mesh.matrixWorld]) {
+            for (const source of [ camera.matrixWorldInverse, camera.projectionMatrix, mesh.matrixWorld ]) {
                 for (const value of source.elements) {
                     if (signature[index] !== value) unchanged = false;
                     signature[index++] = value;
                 }
             }
-            for (const value of [viewport.x, viewport.y, viewport.z, viewport.w, mesh.userData.volumeVersion]) {
+            for (const value of [ viewport.x, viewport.y, viewport.z, viewport.w, mesh.userData.volumeVersion ]) {
                 if (signature[index] !== value) unchanged = false;
                 signature[index++] = value;
             }
@@ -62,11 +71,17 @@ export function createTailScreenMask(THREE, mesh, uniforms) {
             let changed = columns !== width || rows !== height || integer !== integerMask;
             if (changed) {
                 texture.dispose();
-                width = columns; height = rows; integerMask = integer;
+                width = columns;
+                height = rows;
+                integerMask = integer;
                 texture.format = integer ? THREE.RedIntegerFormat : THREE.RGBAFormat;
                 texture.type = integer ? THREE.UnsignedIntType : THREE.UnsignedByteType;
-                texture.internalFormat = integer ? 'R32UI' : null;
-                texture.image = { data: integer ? new Uint32Array(width * height) : new Uint8Array(width * height * 4), width, height };
+                texture.internalFormat = integer ? "R32UI" : null;
+                texture.image = {
+                    data: integer ? new Uint32Array(width * height) : new Uint8Array(width * height * 4),
+                    width: width,
+                    height: height
+                };
                 scratch = integer ? new Uint32Array(width * height) : new Uint8Array(width * height * 4);
             }
             scratch.fill(0);
@@ -83,13 +98,15 @@ export function createTailScreenMask(THREE, mesh, uniforms) {
                 const side = mesh.userData.nodeSides[nodeIndex];
                 const radius = Math.max(node.w, 1e-8);
                 const upRadius = radius * up.w;
-                const alongRadius = Math.max(tangent.w, radius * 0.5);
+                const alongRadius = Math.max(tangent.w, radius * .5);
                 center.set(node.x, node.y, node.z);
                 let outside = false;
                 for (const plane of frustum.planes) {
-                    const extent = SUPPORT * Math.hypot(plane.normal.dot(side) * radius,
-                        plane.normal.dot(up) * upRadius, plane.normal.dot(tangent) * alongRadius);
-                    if (plane.distanceToPoint(center) + extent < -1e-12) { outside = true; break; }
+                    const extent = SUPPORT * Math.hypot(plane.normal.dot(side) * radius, plane.normal.dot(up) * upRadius, plane.normal.dot(tangent) * alongRadius);
+                    if (plane.distanceToPoint(center) + extent < -1e-12) {
+                        outside = true;
+                        break;
+                    }
                 }
                 if (outside) continue;
                 center.applyMatrix4(matrix);
@@ -110,7 +127,6 @@ export function createTailScreenMask(THREE, mesh, uniforms) {
                     right = Math.min(width - 1, Math.floor((x[1] + 2) / TILE_PIXELS));
                     bottom = Math.max(0, Math.floor((y[0] - 2) / TILE_PIXELS));
                     top = Math.min(height - 1, Math.floor((y[1] + 2) / TILE_PIXELS));
-
                 }
                 if (right < left || top < bottom) continue;
                 const stride = integerMask ? 1 : 4;
@@ -118,7 +134,8 @@ export function createTailScreenMask(THREE, mesh, uniforms) {
                 const bit = 1 << (integerMask ? nodeIndex : nodeIndex % 8);
                 for (let y = bottom; y <= top; y++) {
                     for (let x = left; x <= right; x++) {
-                        scratch[(y*width+x)*stride+channel]|=bit;candidates++;
+                        scratch[(y * width + x) * stride + channel] |= bit;
+                        candidates++;
                     }
                 }
             }
@@ -128,15 +145,21 @@ export function createTailScreenMask(THREE, mesh, uniforms) {
             const pixels = texture.image.data;
             if (!changed) {
                 for (let index = 0; index < pixels.length; index++) {
-                    if (pixels[index] !== scratch[index]) { changed = true; break; }
+                    if (pixels[index] !== scratch[index]) {
+                        changed = true;
+                        break;
+                    }
                 }
             }
-            if (changed) { pixels.set(scratch); texture.needsUpdate = true; }
+            if (changed) {
+                pixels.set(scratch);
+                texture.needsUpdate = true;
+            }
         },
         dispose() {
             if (disposed) return;
             disposed = true;
             texture.dispose();
-        },
+        }
     };
 }
