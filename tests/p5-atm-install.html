@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c9 — atmosphere installer derivation GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  #status { position: fixed; left: 8px; top: 8px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="status">P5c9 atmosphere installer derivation starting…</div>
+<script type="module">
+import * as THREE from "three";
+import {
+  createAtmCompositeInstall
+} from "../src/shaders/planet-atmosphere-composite.tsl.js";
+
+const status = document.getElementById("status");
+const note = (t) => { status.textContent += "\n" + t; };
+
+// Stubs for the production installers' environment. The installers read
+// the scene scale from globals, ask atm-sampling for its uniform set,
+// and ask BodyShapes for the sky geometry; none of those are under test
+// here (the sampling arithmetic was proved at P4), so they are replaced
+// with recorders. Everything derived from them is production code.
+window.ATM_SAMPLING_GLSL = "";
+window.atmSamplingUniforms = () => ({ uStubSampling: { value: 1 } });
+let lastShell = null;
+window.BodyShapes = {
+  createGeometry(three, key, radius, w, h) {
+    lastShell = { key, radius, segments: [w, h] };
+    return new three.SphereGeometry(radius, 8, 8);
+  }
+};
+
+await new Promise((resolve, reject) => {
+  const script = document.createElement("script");
+  script.src = "../src/shaders/planet-atmosphere-composite.glsl.js";
+  script.onload = resolve;
+  script.onerror = reject;
+  document.head.appendChild(script);
+});
+if (typeof window.installAtmComposite !== "function" ||
+    typeof window.installAtmSky !== "function") {
+  throw new Error("production installers did not load");
+}
+note("production installers loaded");
+
+const KM_PER_AU_VALUE = 149597870.7;
+
+function productionCase(testCase) {
+  window.KM_PER_AU = KM_PER_AU_VALUE;
+  window.AU_UNITS = testCase.auUnits;
+  const material = { userData: {}, needsUpdate: false };
+  const geometry = new THREE.SphereGeometry(Math.max(testCase.radiusUnits, 1e-9), 8, 8);
+  geometry.parameters.radius = testCase.radiusUnits;
+  if (testCase.axes) geometry.userData.referenceAxesKm = testCase.axes;
+  const body = new THREE.Mesh(geometry, material);
+  const table = { header: testCase.header };
+  const uniforms = window.installAtmComposite(THREE, testCase.key, table, body,
+    testCase.enabled === undefined ? {} : { enabled: testCase.enabled });
+  if (!uniforms) return null;
+  lastShell = null;
+  const sky = window.installAtmSky(THREE, testCase.key, table, body, uniforms);
+  return {
+    kmPerUnit: uniforms.uAtmKmPerUnit.value,
+    axisScale: uniforms.uAtmAxisScale.value.toArray(),
+    enabled: uniforms.uAtmEnabled.value,
+    eyeLocalKm: uniforms.uAtmEyeLocalKm.value.toArray(),
+    sunDirLocal: uniforms.uAtmSunDirLocal.value.toArray(),
+    sunIrradiance: uniforms.uAtmSunIrradiance.value.toArray(),
+    debugMode: uniforms.uAtmDebugMode.value,
+    rayScale: uniforms.uAtmRayScale.value.toArray(),
+    viewToLocalIdentity: uniforms.uAtmViewToLocal.value.elements
+      .every((v, i) => v === [1, 0, 0, 0, 1, 0, 0, 0, 1][i]),
+    shellRadius: sky ? lastShell.radius : null,
+    sky: sky ? {
+      material: {
+        transparent: sky.material.transparent,
+        depthWrite: sky.material.depthWrite,
+        depthTest: sky.material.depthTest,
+        side: sky.material.side,
+        toneMapped: sky.material.toneMapped,
+        fog: sky.material.fog
+      },
+      sharedEyeUniform: sky.material.uniforms.uAtmEyeLocalKm === uniforms.uAtmEyeLocalKm,
+      sharedKmUniform: sky.material.uniforms.uAtmKmPerUnit === uniforms.uAtmKmPerUnit,
+      skyDebug: sky.material.uniforms.uAtmSkyDebug.value,
+      renderOrder: sky.renderOrder,
+      name: sky.name,
+      isAtmSky: sky.userData.isAtmSky === true
+    } : null
+  };
+}
+
+function tslCase(testCase) {
+  const install = createAtmCompositeInstall({
+    header: testCase.header,
+    kmPerUnit: KM_PER_AU_VALUE / testCase.auUnits,
+    radiusUnits: testCase.radiusUnits,
+    referenceAxesKm: testCase.axes,
+    enabled: testCase.enabled
+  });
+  if (!install) return null;
+  const o = install.compositeOptions;
+  return {
+    kmPerUnit: install.derived.kmPerUnit,
+    axisScale: install.samplingOptions.axisScale,
+    enabled: install.enabled,
+    eyeLocalKm: o.eyeLocalKm,
+    sunDirLocal: o.sunDirLocal,
+    sunIrradiance: o.sunIrradiance,
+    debugMode: o.debugMode,
+    rayScale: o.rayScale,
+    // undefined viewToLocal means createAtmComposite builds the identity,
+    // exactly the production Matrix3 default.
+    viewToLocalIdentity: o.viewToLocal === undefined,
+    shellRadius: install.shellRadius,
+    sky: install.shellRadius !== null ? {
+      material: { ...install.skyMaterialParameters },
+      skyDebug: o.skyDebug,
+      renderOrder: install.skyMeshParameters.renderOrder,
+      name: testCase.key + install.skyMeshParameters.nameSuffix,
+      isAtmSky: install.skyMeshParameters.isAtmSky
+    } : null
+  };
+}
+
+const auUnits = 10000;
+const kmPerUnit = KM_PER_AU_VALUE / auUnits;
+const CASES = [
+  // Earth-like: table baked at the drawn radius (ratio 1), sphere.
+  { name: "earth-own-radius", key: "earth", auUnits,
+    header: { groundRadiusKm: 6371, topRadiusKm: 6431 },
+    radiusUnits: 6371 / kmPerUnit, axes: undefined, enabled: undefined },
+  // Giant: table at one tenth scale, oblate drawn axes, disabled.
+  { name: "giant-tenth-scale-oblate", key: "jupiter", auUnits,
+    header: { groundRadiusKm: 6991.1, topRadiusKm: 7051.1 },
+    radiusUnits: 69911 / kmPerUnit, axes: [71492, 71492, 66854], enabled: false },
+  // Different scene scale: km-per-unit must flow through both sides.
+  { name: "mars-other-scene-scale", key: "mars", auUnits: 5000,
+    header: { groundRadiusKm: 3396, topRadiusKm: 3456 },
+    radiusUnits: 3396 / (KM_PER_AU_VALUE / 5000), axes: [3396.2, 3396.2, 3376.2], enabled: true },
+  // Guard: no drawn radius -> both installers refuse.
+  { name: "no-drawn-radius", key: "ghost", auUnits,
+    header: { groundRadiusKm: 1000, topRadiusKm: 1100 },
+    radiusUnits: 0, axes: undefined, enabled: undefined },
+  // Guard: shell top not above ground -> composite installs, sky refuses.
+  { name: "degenerate-shell", key: "flat", auUnits,
+    header: { groundRadiusKm: 2000, topRadiusKm: 2000 },
+    radiusUnits: 2000 / kmPerUnit, axes: undefined, enabled: undefined }
+];
+
+const results = CASES.map((testCase) => ({
+  name: testCase.name,
+  production: productionCase(testCase),
+  tsl: tslCase(testCase)
+}));
+window.__p5atminstall = { ready: true, cases: results };
+note("cases complete: " + results.length);
+</script>
+</body>
+</html>

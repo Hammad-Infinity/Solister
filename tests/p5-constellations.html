@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e9 — constellations materials GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e9 constellations starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createConstellationFigures, createConstellationBoundaries } from "../src/sky/constellations.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { vec4 } from "three/tsl";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LineBasicNodeMaterial,
+  LineSegments as NodeLineSegments,
+  SphereGeometry as NodeSphereGeometry,
+  BufferGeometry as NodeBufferGeometry,
+  BufferAttribute as NodeBufferAttribute,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  AdditiveBlending as NodeAdditiveBlending,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// The figure + boundary line materials of
+// constellations.js (1px segments on the camera-centred
+// sky sphere, vertex forcing clip z to w * 0.99997 /
+// 0.99996 under the production log-depth renderer)
+// against their extracted production assemblies.
+// Segment sets are deterministic synthetic asterisms and
+// boundary loops on a radius-100 sphere around the
+// camera, in production's position-only layout.
+// Cases:
+//   0 figure asterisms (production colour/opacity)
+//   1 boundary loops (premultiplied fragment)
+//   2 figures + log-depth occluder spheres at 40 and 400
+//     units: production's squashed z (~0.999985 depth)
+//     loses to both, while an (incorrect) automatic log
+//     depth on the lines (0.54 at 100 units) would draw
+//     them over the far sphere -- the discriminating case
+//   3 figures + boundaries together (renderOrder -400
+//     then -300, additive, no depth writes)
+//   4 segments crossing behind the camera / near plane
+//   5 dense line star, white, opacity 1 (additive pileup)
+const NEAR = 0.1;
+const FAR = 5000;
+const R = 100;
+const CASES = [
+  { kind: "figures-asterisms" },
+  { kind: "boundaries-loops" },
+  { kind: "figures-occluders", occluders: true },
+  { kind: "both-lines", both: true },
+  { kind: "figures-behind", behind: true },
+  { kind: "figures-star", star: true, color: 16777215, opacity: 1.0 },
+  // Axis-aligned segments only: the node-WebGL energy
+  // deficit in the other cases is the aliased line walk
+  // (area = max(|dx|,|dy|) of true line area, 0.707 at
+  // 45 deg) against classic MSAA coverage; at 0/90 deg
+  // the walk area equals the true area, so this case
+  // must return ~1.0 on WebGL if that mechanism is the
+  // whole story.
+  { kind: "figures-axis", axis: true }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5con = { done: false, error: null };
+
+async function loadProduction() {
+  const text = await fetch("../src/sky/constellations.js").then(r => {
+    if (!r.ok) throw new Error("constellations.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalOf = (marker, from = 0) => {
+    const at = text.indexOf(marker, from);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return Function("return " + text.slice(tick, end + 1))();
+  };
+  const figAt = text.indexOf("_buildFigures() {");
+  const bndAt = text.indexOf("_buildBoundaries() {");
+  if (figAt < 0 || bndAt < 0) throw new Error("line builders not found");
+  const figVertex = literalOf("vertexShader:", figAt);
+  const figFragment = literalOf("fragmentShader:", figAt);
+  const bndVertex = literalOf("vertexShader:", bndAt);
+  const bndFragment = literalOf("fragmentShader:", bndAt);
+  if (!figVertex.includes("0.99997") || !bndVertex.includes("0.99996") ||
+      !figFragment.includes("vec4(uColor, uOpacity)") ||
+      !bndFragment.includes("vec4(uColor * uOpacity, uOpacity)")) {
+    throw new Error("extracted constellation shaders do not look like production");
+  }
+  return { figVertex, figFragment, bndVertex, bndFragment };
+}
+
+// Direction on the rig sky sphere; azimuth/elevation in
+// degrees, camera looks down -z.
+function dir(azDeg, elDeg, radius = R) {
+  const az = azDeg * Math.PI / 180;
+  const el = elDeg * Math.PI / 180;
+  return [
+    Math.sin(az) * Math.cos(el) * radius,
+    Math.sin(el) * radius,
+    -Math.cos(az) * Math.cos(el) * radius
+  ];
+}
+
+function segmentsFromPolylines(polylines) {
+  const out = [];
+  for (const line of polylines) {
+    for (let i = 0; i < line.length - 1; i++) out.push(...line[i], ...line[i + 1]);
+  }
+  return new Float32Array(out);
+}
+
+function figureSegments() {
+  return segmentsFromPolylines([
+    [dir(-28, 14), dir(-16, 20), dir(-6, 15), dir(2, 22), dir(10, 16)],
+    [dir(-22, -8), dir(-12, -16), dir(-2, -10), dir(8, -18), dir(18, -8), dir(24, -16)],
+    [dir(16, 26), dir(20, 12), dir(15, 0), dir(22, -6)],
+    [dir(-30, -24), dir(-18, -22), dir(-8, -27), dir(4, -24)],
+    [dir(-6, 15), dir(-2, -10)],
+    [dir(-34, 4), dir(34, -2)],
+    [dir(-34, -12), dir(30, 18)]
+  ]);
+}
+
+function loopSegments(azDeg, elDeg, rhoDeg, count = 14) {
+  const c = dir(azDeg, elDeg, 1);
+  const up = Math.abs(c[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+  const cross = (a, b) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0]
+  ];
+  const norm = (a) => {
+    const l = Math.hypot(...a) || 1;
+    return a.map(x => x / l);
+  };
+  const e1 = norm(cross(c, up));
+  const e2 = cross(e1, c);
+  const rho = rhoDeg * Math.PI / 180;
+  const pts = [];
+  for (let i = 0; i < count; i++) {
+    const t = i / count * Math.PI * 2;
+    pts.push([0, 1, 2].map(k =>
+      (c[k] * Math.cos(rho) + (e1[k] * Math.cos(t) + e2[k] * Math.sin(t)) * Math.sin(rho)) * R));
+  }
+  pts.push(pts[0]);
+  return segmentsFromPolylines([pts]);
+}
+
+function boundarySegments() {
+  const a = loopSegments(-14, 8, 13);
+  const b = loopSegments(16, -10, 11);
+  const extra = segmentsFromPolylines([
+    [dir(-30, 22), dir(-14, 21), dir(0, 25), dir(14, 21), dir(28, 24)],
+    [dir(-28, -24), dir(-12, -20), dir(2, -26), dir(16, -21), dir(30, -24)]
+  ]);
+  const out = new Float32Array(a.length + b.length + extra.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  out.set(extra, a.length + b.length);
+  return out;
+}
+
+function behindSegments() {
+  const base = Array.from(figureSegments());
+  const extra = [
+    // one endpoint behind the camera (z > 0), one in front
+    -40, 10, 30, 30, -6, -100,
+    25, -30, 55, -20, 14, -100,
+    0, 42, 18, 4, -30, -100,
+    // straddling the near plane very close to the eye
+    -0.05, 0.02, -0.06, -30, 12, -100,
+    // fully behind: must vanish on both sides
+    -20, 5, 40, 25, -8, 60
+  ];
+  return new Float32Array([...base, ...extra]);
+}
+
+function starSegments() {
+  const out = [];
+  for (let i = 0; i < 12; i++) {
+    const t = i * 15 * Math.PI / 180;
+    const dx = Math.cos(t) * 62, dy = Math.sin(t) * 62;
+    out.push(-dx, -dy, -100, dx, dy, -100);
+  }
+  return new Float32Array(out);
+}
+
+function axisSegments() {
+  const out = [];
+  for (const y of [-45, -27, -9, 9, 27, 45]) out.push(-58, y, -100, 58, y, -100);
+  for (const x of [-45, -27, -9, 9, 27, 45]) out.push(x, -58, -100, x, 58, -100);
+  out.push(-58, 0, -100, 58, 0, -100);
+  out.push(0, -58, -100, 0, 58, -100);
+  return new Float32Array(out);
+}
+
+function caseSegments() {
+  if (cfg.axis) return { figures: axisSegments(), boundaries: null };
+  if (cfg.star) return { figures: starSegments(), boundaries: null };
+  if (cfg.behind) return { figures: behindSegments(), boundaries: null };
+  if (cfg.both) return { figures: figureSegments(), boundaries: boundarySegments() };
+  if (cfg.kind === "boundaries-loops") return { figures: null, boundaries: boundarySegments() };
+  return { figures: figureSegments(), boundaries: null };
+}
+
+function makeCamera(isNode) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, NEAR, FAR);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  return camera;
+}
+
+const OCCLUDERS = [
+  { pos: [12, 6, -40], r: 11 },
+  { pos: [-30, -14, -400], r: 85 }
+];
+
+function buildGlslScene(prod, segs) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(false);
+  scene.add(camera);
+  if (cfg.occluders) {
+    for (const o of OCCLUDERS) {
+      const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.3, 0.32, 0.36) });
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(o.r, 48, 32), mat);
+      mesh.position.set(...o.pos);
+      scene.add(mesh);
+    }
+  }
+  const addLines = (positions, vertex, fragment, color, opacity, renderOrder) => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(color) },
+        uOpacity: { value: opacity }
+      },
+      vertexShader: vertex,
+      fragmentShader: fragment,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: true,
+      toneMapped: false,
+      fog: false
+    });
+    const lines = new THREE.LineSegments(geometry, material);
+    lines.frustumCulled = false;
+    lines.renderOrder = renderOrder;
+    scene.add(lines);
+  };
+  if (segs.figures) {
+    addLines(segs.figures, prod.figVertex, prod.figFragment,
+      cfg.color ?? 9417446, cfg.opacity ?? 0.46, -400);
+  }
+  if (segs.boundaries) {
+    addLines(segs.boundaries, prod.bndVertex, prod.bndFragment, 14478079, 0.58, -300);
+  }
+  return { scene, camera };
+}
+
+function buildTslScene(segs) {
+  const scene = new NodeScene();
+  const camera = makeCamera(true);
+  scene.add(camera);
+  if (cfg.occluders) {
+    for (const o of OCCLUDERS) {
+      const material = new MeshBasicNodeMaterial({ name: "P5e9 occluder TSL" });
+      material.colorNode = vec4(0.3, 0.32, 0.36, 1.0);
+      const mesh = new NodeMesh(new NodeSphereGeometry(o.r, 48, 32), material);
+      mesh.position.set(...o.pos);
+      scene.add(mesh);
+    }
+  }
+  const addLines = (positions, slots, name, renderOrder) => {
+    const geometry = new NodeBufferGeometry();
+    geometry.setAttribute("position", new NodeBufferAttribute(positions, 3));
+    const material = new LineBasicNodeMaterial({ name });
+    material.transparent = true;
+    material.depthWrite = false;
+    material.depthTest = true;
+    material.blending = NodeAdditiveBlending;
+    material.vertexNode = slots.vertexNode;
+    material.colorNode = slots.colorNode;
+    if (slots.depthNode) material.depthNode = slots.depthNode;
+    const lines = new NodeLineSegments(geometry, material);
+    lines.frustumCulled = false;
+    lines.renderOrder = renderOrder;
+    scene.add(lines);
+  };
+  if (segs.figures) {
+    addLines(segs.figures, createConstellationFigures({
+      color: cfg.color !== undefined ? new NodeColor(cfg.color) : undefined,
+      opacity: cfg.opacity
+    }), "P5e9 figures TSL", -400);
+  }
+  if (segs.boundaries) {
+    addLines(segs.boundaries, createConstellationBoundaries(), "P5e9 boundaries TSL", -300);
+  }
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProduction();
+  const segs = caseSegments();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod, segs) : buildTslScene(segs);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5con = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    figureVerts: segs.figures ? segs.figures.length / 3 : 0,
+    boundaryVerts: segs.boundaries ? segs.boundaries.length / 3 : 0,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e9 constellations ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5con = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e9 constellations error: " + window.__p5con.error;
+}
+</script>
+</body>
+</html>

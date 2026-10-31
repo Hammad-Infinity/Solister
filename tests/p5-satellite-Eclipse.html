@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c1 — satellite Eclipse visibility GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c1 satellite Eclipse starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { satelliteSunVisibility } from "../src/bodies/planets/moon-eclipses.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { uv, vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+// Receiver points are the plane z=0, x/y in [-1.5, 1.5]. Sun and casters use
+// the production uniform shape: xyz position with radius in w. The cases
+// cover one caster, several multiplying casters, the production early-outs
+// plus an ignored caster beyond the count, and the disabled switch.
+const CASES = [
+  {
+    enabled: 1,
+    sun: [0, 0, 10, 1.0],
+    casterCount: 1,
+    casters: [[0, 0, 5, 0.45]]
+  },
+  {
+    enabled: 1,
+    sun: [0, 0, 10, 1.0],
+    casterCount: 3,
+    casters: [
+      [0.35, 0.15, 5, 0.25],
+      [-0.3, -0.1, 4.5, 0.35],
+      [0.1, -0.35, 6, 0.2]
+    ]
+  },
+  {
+    enabled: 1,
+    sun: [0, 0, 10, 1.0],
+    casterCount: 3,
+    casters: [
+      [-0.25, -0.2, 4, 0.8],
+      [0, 0, -5, 0.5],
+      [3, 0, 5, 0.3],
+      [0, 0, 5, 0.9]
+    ]
+  },
+  {
+    enabled: 0,
+    sun: [0, 0, 10, 1.0],
+    casterCount: 1,
+    casters: [[0, 0, 5, 0.45]]
+  }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5sat = { done: false, error: null };
+
+async function loadSatelliteGlsl() {
+  // Extract the exact production GLSL template literal from moon-eclipses.js
+  // so this comparison cannot drift from the material patch it proves.
+  const text = await fetch("../src/bodies/planets/moon-eclipses.js").then(r => {
+    if (!r.ok) throw new Error("moon-eclipses.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const marker = "const GLSL = " + tickChar;
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error("satellite Eclipse GLSL not found");
+  const tick = start + marker.length - 1;
+  const end = text.indexOf(tickChar + ";", tick);
+  if (end < 0) throw new Error("satellite Eclipse GLSL terminator not found");
+  return Function("return " + text.slice(tick, end + 1))();
+}
+
+function paddedCasters() {
+  const out = cfg.casters.map(c => new THREE.Vector4(c[0], c[1], c[2], c[3]));
+  while (out.length < 8) out.push(new THREE.Vector4(0, 0, 0, 0));
+  return out;
+}
+
+function makeGlslMaterial(glsl) {
+  return new THREE.ShaderMaterial({
+    name: "P5c1 satellite Eclipse GLSL reference",
+    uniforms: {
+      uSatelliteEclipsesOn: { value: cfg.enabled },
+      uSatelliteSunView: { value: new THREE.Vector4(cfg.sun[0], cfg.sun[1], cfg.sun[2], cfg.sun[3]) },
+      uSatelliteCasterCount: { value: cfg.casterCount },
+      uSatelliteCasters: { value: paddedCasters() }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vSatelliteReceiverView;
+      void main() {
+        vUv = uv;
+        vSatelliteReceiverView = (modelViewMatrix * vec4(position, 1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      ${glsl}
+      void main() {
+        vec3 p = vec3((vUv * 2.0 - 1.0) * 1.5, 0.0);
+        float v = satelliteSunVisibility(p);
+        gl_FragColor = vec4(v, 1.0 - v, v * v, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P5c1 satellite Eclipse TSL" });
+  const pUv = uv();
+  const p = vec3(
+    pUv.x.mul(2.0).sub(1.0).mul(1.5),
+    pUv.y.mul(2.0).sub(1.0).mul(1.5),
+    float(0.0));
+  const v = satelliteSunVisibility(
+    p,
+    vec4(cfg.sun[0], cfg.sun[1], cfg.sun[2], cfg.sun[3]),
+    cfg.casters.map(c => vec4(c[0], c[1], c[2], c[3])),
+    float(cfg.casterCount),
+    float(cfg.enabled));
+  material.colorNode = vec4(v, float(1.0).sub(v), v.mul(v), float(1.0));
+  return material;
+}
+
+try {
+  const satelliteGlsl = impl === "glsl" ? await loadSatelliteGlsl() : "";
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeGlslMaterial(satelliteGlsl);
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeTslMaterial();
+    mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5sat = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    enabled: cfg.enabled,
+    casterCount: cfg.casterCount,
+    suppliedCasters: cfg.casters.length,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c1 satellite Eclipse ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5sat = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c1 satellite Eclipse error: " + window.__p5sat.error;
+}
+</script>
+</body>
+</html>

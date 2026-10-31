@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e11 — comet nucleus depth GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e11 comet-depth starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createCometNucleusDepth } from "../src/bodies/small-bodies/comet-depth.tsl.js";
+import { texture as tslTexture, uv as tslUv, vec2 as tslVec2 } from "three/tsl";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  NoBlending as NodeNoBlending,
+  Color as NodeColor,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// The comet nucleus depth pre-pass material (radial view distance
+// over a range, packed with packDepthToRGBA) against its extracted
+// production assembly. Production renders it into a cropped
+// unsigned-byte render target cleared white ("no nucleus" = 1.0)
+// with the default samples=0; this rig does the same and blits the
+// target to the canvas with a Nearest full-coverage copy (byte-
+// exact), because the app canvas is MSAA and averaging packed
+// depth bytes across samples does not decode to anything
+// meaningful. Packed byte 4 rides in alpha and is not screenshot-
+// visible — the verifier decodes the 24-bit value, whose dropped
+// term is below 1e-7.
+// Cases:
+//   0 sphere on axis, mid-range values
+//   1 sphere close and off-axis (steeper radial gradient)
+//   2 range inside the sphere's far shell (clamp 0.99999 ring)
+//   3 two overlapping spheres (depth-test ordering)
+//   4 rotated ellipsoid (non-uniform modelView)
+const NEAR = 0.1;
+const FAR = 5000;
+const CASES = [
+  { kind: "sphere-mid", range: 40, bodies: [{ r: 3, pos: [0, 0, -20] }] },
+  { kind: "sphere-close", range: 16, bodies: [{ r: 6, pos: [-4, 2, -14] }] },
+  { kind: "sphere-clamp", range: 27, bodies: [{ r: 5, pos: [0, 0, -30] }] },
+  { kind: "spheres-overlap", range: 45, bodies: [{ r: 4, pos: [-3, 0, -18] }, { r: 5, pos: [3.5, -1, -26] }] },
+  { kind: "ellipsoid", range: 40, bodies: [{ r: 4, pos: [2, -2, -22], scale: [1.6, 0.7, 1.1], rot: [0.4, 0.3, 0.2] }] },
+  // Mechanism discriminators for the residual facet-edge
+  // differences at production tessellation: one huge-triangle
+  // plane (interpolation-exact except its diagonal) and the
+  // case-0 sphere at 512x256 segments (facets << 1 px, where
+  // the facet-pillow divergence must collapse quadratically).
+  { kind: "plane", range: 40, plane: true, bodies: [{ r: 0, pos: [0, 0, -20] }] },
+  { kind: "sphere-hires", range: 40, seg: [512, 256], bodies: [{ r: 3, pos: [0, 0, -20] }] },
+  // The case-4 ellipsoid at 512x256: if its handful of
+  // WebGPU facet-edge pixels are cross-rasterizer edge
+  // ownership (last-bit clip differences flipping which
+  // facet covers a pixel), the pillow-plane divergence
+  // collapses quadratically with facet size and this
+  // case must be exact at the default tolerance.
+  { kind: "ellipsoid-hires", range: 40, seg: [512, 256], bodies: [{ r: 4, pos: [2, -2, -22], scale: [1.6, 0.7, 1.1], rot: [0.4, 0.3, 0.2] }] },
+  // Range discriminator for the same pixels: at range 400
+  // a world-space interpolation error shrinks 10x in
+  // packed units (below tolerance), while a pack/fragment
+  // arithmetic error would stay at the same magnitude.
+  { kind: "ellipsoid-farrange", range: 400, bodies: [{ r: 4, pos: [2, -2, -22], scale: [1.6, 0.7, 1.1], rot: [0.4, 0.3, 0.2] }] }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5cd = { done: false, error: null };
+
+async function loadProduction() {
+  const text = await fetch("../src/bodies/small-bodies/comet-depth.js").then(r => {
+    if (!r.ok) throw new Error("comet-depth.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalOf = (marker, from = 0) => {
+    const at = text.indexOf(marker, from);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return Function("return " + text.slice(tick, end + 1))();
+  };
+  const vertex = literalOf("vertexShader:");
+  const fragment = literalOf("fragmentShader:");
+  if (!vertex.includes("point.xyz/max(range") && !vertex.includes("/max(range") ||
+      !fragment.includes("packDepthToRGBA")) {
+    throw new Error("extracted comet-depth shaders do not look like production");
+  }
+  return { vertex, fragment };
+}
+
+function makeCamera(isNode) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, NEAR, FAR);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  return camera;
+}
+
+function buildGlslScene(prod) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(false);
+  scene.add(camera);
+  for (const body of cfg.bodies) {
+    const material = new THREE.ShaderMaterial({
+      name: "P5e11 comet depth GLSL",
+      uniforms: { range: { value: cfg.range } },
+      precision: "highp",
+      vertexShader: prod.vertex,
+      fragmentShader: prod.fragment,
+      side: THREE.FrontSide,
+      toneMapped: false,
+      blending: THREE.NoBlending
+    });
+    const geometry = cfg.plane
+      ? new THREE.PlaneGeometry(8, 8, 1, 1)
+      : new THREE.SphereGeometry(body.r, cfg.seg ? cfg.seg[0] : 96, cfg.seg ? cfg.seg[1] : 64);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(...body.pos);
+    if (body.scale) mesh.scale.set(...body.scale);
+    if (body.rot) mesh.rotation.set(...body.rot);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+function buildTslScene() {
+  const scene = new NodeScene();
+  const camera = makeCamera(true);
+  scene.add(camera);
+  for (const body of cfg.bodies) {
+    const slots = createCometNucleusDepth({ range: cfg.range });
+    const material = new MeshBasicNodeMaterial({ name: "P5e11 comet depth TSL" });
+    material.blending = NodeNoBlending;
+    material.toneMapped = false;
+    material.vertexNode = slots.vertexNode;
+    material.colorNode = slots.colorNode;
+    if (slots.depthNode) material.depthNode = slots.depthNode;
+    const geometry = cfg.plane
+      ? new NodeNS.PlaneGeometry(8, 8, 1, 1)
+      : new NodeSphereGeometry(body.r, cfg.seg ? cfg.seg[0] : 96, cfg.seg ? cfg.seg[1] : 64);
+    const mesh = new NodeMesh(geometry, material);
+    mesh.position.set(...body.pos);
+    if (body.scale) mesh.scale.set(...body.scale);
+    if (body.rot) mesh.rotation.set(...body.rot);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProduction();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    // Production renders this pass into a render target with the
+    // default samples=0: MSAA would average packed depth bytes
+    // per sample, which does not decode to anything meaningful.
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  // Production clears the depth target white (16777215): "no nucleus".
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(1, 1, 1) : new THREE.Color(1, 1, 1), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod) : buildTslScene();
+
+  // Production render-target shape (comet-depth.js record.target):
+  // Nearest, depth buffer, no stencil, default samples=0.
+  const NS = impl === "tsl" ? NodeNS : THREE;
+  const target = new NS.WebGLRenderTarget(size, size, {
+    minFilter: NS.NearestFilter,
+    magFilter: NS.NearestFilter,
+    depthBuffer: true,
+    stencilBuffer: false
+  });
+  target.texture.colorSpace = NS.NoColorSpace;
+  const blitScene = new NS.Scene();
+  const blitCamera = new NS.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  let blitMaterial;
+  if (impl === "tsl") {
+    blitMaterial = new MeshBasicNodeMaterial({ name: "P5e11 blit TSL" });
+    // The WebGPU backend stores render-target contents in the
+    // opposite vertical orientation to the classic GL target;
+    // compensate in the blit UV so both canvases agree.
+    blitMaterial.colorNode = tslTexture(target.texture, tslVec2(tslUv().x, tslUv().y.oneMinus()));
+    blitMaterial.toneMapped = false;
+    blitMaterial.depthTest = false;
+    blitMaterial.depthWrite = false;
+  } else {
+    blitMaterial = new THREE.MeshBasicMaterial({ map: target.texture, toneMapped: false, depthTest: false, depthWrite: false });
+  }
+  const blitMesh = new NS.Mesh(new NS.PlaneGeometry(2, 2), blitMaterial);
+  blitMesh.frustumCulled = false;
+  blitScene.add(blitMesh);
+
+  const drawFrame = () => {
+    renderer.setRenderTarget(target);
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    renderer.render(blitScene, blitCamera);
+  };
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    drawFrame();
+  }
+
+  window.__p5cd = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    range: cfg.range,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e11 comet-depth ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(drawFrame);
+} catch (e) {
+  window.__p5cd = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e11 comet-depth error: " + window.__p5cd.error;
+}
+</script>
+</body>
+</html>

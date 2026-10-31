@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e18 — Saturn ring alignment factors GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e18 saturn-alignment starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { SaturnAlignment } from "../src/bodies/rings/saturn-alignment.js";
+import {
+  createSaturnAlignment, deriveSaturnAlignmentInstall
+} from "../src/bodies/rings/saturn-alignment.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { vec4 } from "three/tsl";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  RingGeometry as NodeRingGeometry,
+  DoubleSide as NodeDoubleSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// SaturnAlignment's two mutual-shadow splices against the TSL
+// factors. Both pages run production's real SaturnAlignment.
+// update() over stub saturn/ring/sun objects (so every uniform
+// value is production-computed, and update()'s decisions are
+// checked bit-exact against deriveSaturnAlignmentInstall in
+// page), then capture the installed splices by executing each
+// patched material's onBeforeCompile on a minimal shader stub
+// (the P5c20 method). The classic side runs the captured
+// vertex/fragment pieces in a harness ShaderMaterial with a
+// seeded ReflectedLight, encoding the surviving factor per
+// channel; the node side encodes createSaturnAlignment's
+// factor the same way on the same geometry.
+// Cases:
+//   0 planet side: ring shadow band across the globe
+//   1 planet side: sun almost in the ring plane (grazing)
+//   2 planet side: alphaTest cutoff against the texture bands
+//   3 ring side: planet shadow swath across the ring
+//   4 ring side: distinct ellipsoid axes, grazing sun
+const NEAR = 0.1;
+const FAR = 5000;
+const PLANET_R = 6;
+const RING_INNER = 8;
+const RING_OUTER = 14;
+const CENTRE = [0, 0, -30];
+const CASES = [
+  { kind: "ring-shadow-planet", side: "planet", sun: [40, 25, 10], axesKm: [60000, 50000, 55000], ringTiltX: -1.05, opacity: 1, alphaTest: 0.1 },
+  { kind: "ring-shadow-grazing", side: "planet", sunInPlane: true, axesKm: [60000, 50000, 55000], ringTiltX: -1.05, opacity: 1, alphaTest: 0.1 },
+  { kind: "ring-shadow-cutoff", side: "planet", sun: [-35, 30, 5], axesKm: null, ringTiltX: -0.9, opacity: 0.6, alphaTest: 0.5 },
+  { kind: "planet-shadow-ring", side: "ring", sun: [-50, 10, -5], axesKm: [60000, 50000, 55000], ringTiltX: -1.05, opacity: 1, alphaTest: 0.1 },
+  { kind: "planet-shadow-ellipsoid", side: "ring", sunBehind: true, axesKm: [62000, 48000, 56000], ringTiltX: -1.2, opacity: 1, alphaTest: 0.1 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5sat = { done: false, error: null };
+
+function makeRingTexture(T) {
+  const w = 128, h = 16;
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const v = y / (h - 1);
+      let a = 40 + Math.round(180 * v);
+      if (v > 0.58 && v < 0.68) a = 12;                     // Cassini-like gap
+      if ((x % 32) < 16) a = Math.round(a * 0.45);         // azimuthal striping
+      if (x > 100) a = Math.min(255, a + 60);
+      const p = (y * w + x) * 4;
+      data[p] = 210; data[p + 1] = 200; data[p + 2] = 180; data[p + 3] = a;
+    }
+  }
+  const tex = new T.DataTexture(data, w, h, T.RGBAFormat);
+  tex.wrapS = T.RepeatWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeCamera(isNode) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, NEAR, FAR);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  camera.updateMatrixWorld(true);
+  return camera;
+}
+
+// Builds the production alignment over stubs and returns
+// everything both pages need.
+function buildAlignment() {
+  const saturnGeo = new THREE.SphereGeometry(PLANET_R, 48, 32);
+  if (cfg.axesKm) saturnGeo.userData.referenceAxesKm = cfg.axesKm;
+  const saturn = new THREE.Mesh(saturnGeo, new THREE.MeshStandardMaterial());
+  saturn.position.set(...CENTRE);
+  const ringGeo = new THREE.RingGeometry(RING_INNER, RING_OUTER, 96, 1);
+  const ringTexClassic = makeRingTexture(THREE);
+  ringTexClassic.repeat.set(2, 1);
+  ringTexClassic.offset.set(0.13, 0);
+  const ringMat = new THREE.MeshStandardMaterial({
+    map: ringTexClassic, transparent: true
+  });
+  ringMat.opacity = cfg.opacity;
+  ringMat.alphaTest = cfg.alphaTest;
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.position.set(...CENTRE);
+  ring.rotation.x = cfg.ringTiltX;
+  const sun = new THREE.Object3D();
+  if (cfg.sunInPlane) {
+    ring.updateMatrixWorld(true);
+    const xAxis = new THREE.Vector3(1, 0, 0).transformDirection(ring.matrixWorld);
+    const zAxis = new THREE.Vector3(0, 0, 1).transformDirection(ring.matrixWorld);
+    sun.position.set(...CENTRE).addScaledVector(xAxis, 120).addScaledVector(zAxis, 3);
+  } else if (cfg.sunBehind) {
+    ring.updateMatrixWorld(true);
+    const xAxis = new THREE.Vector3(1, 0, 0).transformDirection(ring.matrixWorld);
+    const zAxis = new THREE.Vector3(0, 0, 1).transformDirection(ring.matrixWorld);
+    sun.position.set(...CENTRE).addScaledVector(xAxis, -90).addScaledVector(zAxis, 6);
+  } else {
+    sun.position.set(...cfg.sun);
+  }
+  saturn.updateMatrixWorld(true);
+  ring.updateMatrixWorld(true);
+  sun.updateMatrixWorld(true);
+  const registry = { saturn, "saturn-ring": ring, sun };
+  const alignment = new SaturnAlignment({ THREE, objectRegistry: registry });
+  alignment.update();
+  return { alignment, saturn, ring, sun };
+}
+
+// Executes a production-patched material's onBeforeCompile on a
+// minimal shader stub and parses out production's own splice.
+function captureSplice(material) {
+  const shader = {
+    uniforms: {},
+    vertexShader: "void main() {\n#include <begin_vertex>\n}",
+    fragmentShader: "void main() {\n#include <lights_fragment_end>\n}"
+  };
+  material.onBeforeCompile(shader, null);
+  const v = shader.vertexShader;
+  const vertexDecl = v.split("\n")[0];
+  const vertexCode = v.split("#include <begin_vertex>\n")[1].replace(/\n}$/, "");
+  const f = shader.fragmentShader;
+  const fragmentDecl = f.split("\n")[0];
+  const marker = "#include <lights_fragment_end>\n{\n";
+  const effect = f.slice(f.indexOf(marker) + marker.length, f.lastIndexOf("\n}\n}"));
+  if (!vertexDecl || !vertexCode || !fragmentDecl || !effect.includes("reflectedLight"))
+    throw new Error("splice capture failed");
+  return { vertexDecl, vertexCode, fragmentDecl, effect, uniforms: shader.uniforms };
+}
+
+// Derivation bit-exactness, in page: SaturnAlignment's live u
+// against deriveSaturnAlignmentInstall over the same inputs.
+function checkDerivation(alignment, saturn, ring) {
+  const u = alignment.u;
+  const derived = deriveSaturnAlignmentInstall({
+    radius: PLANET_R,
+    axesKm: cfg.axesKm || undefined,
+    inner: u.aInner.value,
+    outer: u.aOuter.value,
+    opacity: cfg.opacity,
+    alphaTest: cfg.alphaTest,
+    visible: ring.visible
+  });
+  const eps = 0;
+  const axesOk = Math.abs(derived.axes[0] - u.aAxes.value.x) <= eps &&
+    Math.abs(derived.axes[1] - u.aAxes.value.y) <= eps &&
+    Math.abs(derived.axes[2] - u.aAxes.value.z) <= eps;
+  const ok = axesOk &&
+    derived.radius === u.aRadius.value &&
+    derived.opacity === u.aOpacity.value &&
+    derived.cutoff === u.aCutoff.value &&
+    derived.inner === u.aInner.value &&
+    derived.outer === u.aOuter.value;
+  if (!ok) throw new Error("derivation mismatch: " + JSON.stringify({
+    derived, live: {
+      axes: u.aAxes.value.toArray(), radius: u.aRadius.value,
+      opacity: u.aOpacity.value, cutoff: u.aCutoff.value,
+      inner: u.aInner.value, outer: u.aOuter.value
+    }
+  }));
+}
+
+const HARNESS_SEED = `
+struct ReflectedLight {
+  vec3 directDiffuse;
+  vec3 directSpecular;
+  vec3 indirectDiffuse;
+  vec3 indirectSpecular;
+};
+`;
+
+function buildGlslScene(b) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(false);
+  scene.add(camera);
+  const isPlanet = cfg.side === "planet";
+  const splice = captureSplice(isPlanet ? b.saturn.material : b.ring.material);
+  const encode = isPlanet
+    ? "gl_FragColor = vec4(reflectedLight.directDiffuse.r, reflectedLight.directSpecular.g * 2.0, reflectedLight.directDiffuse.b, 1.0);"
+    : "gl_FragColor = vec4(reflectedLight.directDiffuse.r, reflectedLight.directSpecular.g * 2.0, totalEmissiveRadiance.b * 2.0, 1.0);";
+  const material = new THREE.ShaderMaterial({
+    name: "P5e18 saturn harness GLSL",
+    uniforms: { ...b.alignment.u },
+    vertexShader: splice.vertexDecl + `
+void main() {
+${splice.vertexCode}
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`,
+    fragmentShader: splice.fragmentDecl + HARNESS_SEED + `
+void main() {
+  ReflectedLight reflectedLight;
+  reflectedLight.directDiffuse = vec3(1.0);
+  reflectedLight.directSpecular = vec3(0.5);
+  reflectedLight.indirectDiffuse = vec3(0.0);
+  reflectedLight.indirectSpecular = vec3(0.0);
+  vec3 totalEmissiveRadiance = vec3(0.5);
+  {${splice.effect}}
+  ${encode}
+}`,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+    fog: false
+  });
+  const source = isPlanet ? b.saturn : b.ring;
+  const mesh = new THREE.Mesh(source.geometry.clone(), material);
+  mesh.position.copy(source.position);
+  mesh.quaternion.copy(source.quaternion);
+  mesh.scale.copy(source.scale);
+  mesh.frustumCulled = false;
+  mesh.updateMatrixWorld(true);
+  scene.add(mesh);
+  return { scene, camera };
+}
+
+function buildTslScene(b) {
+  const scene = new NodeScene();
+  const camera = makeCamera(true);
+  scene.add(camera);
+  const u = b.alignment.u;
+  const m4 = m => new NodeNS.Matrix4().fromArray(m.elements);
+  const v3 = v => new NodeNS.Vector3(v.x, v.y, v.z);
+  const ringUV = new NodeNS.Matrix3().fromArray(u.aRingUV.value.elements);
+  const factors = createSaturnAlignment({
+    planetToRing: m4(u.aPlanetToRing.value),
+    ringToPlanet: m4(u.aRingToPlanet.value),
+    sunRing: v3(u.aSunRing.value),
+    sunPlanet: v3(u.aSunPlanet.value),
+    radius: u.aRadius.value,
+    axesKm: cfg.axesKm || undefined,
+    inner: u.aInner.value,
+    outer: u.aOuter.value,
+    ringTexture: makeRingTexture(NodeNS),
+    ringUV,
+    opacity: u.aOpacity.value,
+    alphaTest: u.aCutoff.value,
+    visible: b.ring.visible
+  });
+  const isPlanet = cfg.side === "planet";
+  const factor = isPlanet ? factors.ringShadowTransmission : factors.planetShadowVisibility;
+  const material = new MeshBasicNodeMaterial({ name: "P5e18 saturn harness TSL" });
+  material.side = NodeDoubleSide;
+  material.toneMapped = false;
+  material.colorNode = vec4(factor, factor, factor, 1.0);
+  const geometry = isPlanet
+    ? new NodeSphereGeometry(PLANET_R, 48, 32)
+    : new NodeRingGeometry(RING_INNER, RING_OUTER, 96, 1);
+  const source = isPlanet ? b.saturn : b.ring;
+  const mesh = new NodeMesh(geometry, material);
+  mesh.position.copy(source.position);
+  mesh.quaternion.copy(source.quaternion);
+  mesh.scale.copy(source.scale);
+  mesh.frustumCulled = false;
+  mesh.updateMatrixWorld(true);
+  scene.add(mesh);
+  return { scene, camera };
+}
+
+try {
+  const b = buildAlignment();
+  checkDerivation(b.alignment, b.saturn, b.ring);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(b) : buildTslScene(b);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5sat = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e18 saturn-alignment ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5sat = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e18 saturn-alignment error: " + window.__p5sat.error;
+}
+</script>
+</body>
+</html>

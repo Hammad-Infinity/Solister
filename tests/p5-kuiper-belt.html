@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e24 — kuiper belt GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e24 kuiper-belt starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { KuiperBelt } from "../src/bodies/small-bodies/kuiper-belt.js";
+import { DAY, J2000 } from "../src/bodies/small-bodies/kuiper-core.js";
+import {
+  createKuiperPropagation,
+  createKuiperBackground,
+  createKuiperKnown,
+  createKuiperBackgroundGeometry,
+  createKuiperKnownGeometry,
+  deriveKuiperInstall
+} from "../src/bodies/small-bodies/kuiper-belt.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { uniform } from "three/tsl";
+import {
+  Scene as NodeScene,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  Color as NodeColor,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  NormalBlending as NodeNormalBlending
+} from "three/webgpu";
+
+// P5e24 rig: production's real KuiperBelt class (ES
+// module as shipped) is driven with the app's own
+// option shape on both pages. The workspace has no
+// solister/data/kuiper/ ephemeris (user install data,
+// never shipped in code releases), so the rig serves a
+// synthetic KBOHERM1 fixture through a fetch stub for
+// the two data URLs only -- every line downstream of
+// the fetch (KuiperTable parse, Hermite sampling,
+// buildKnown, update drives) is production code. The
+// GLSL page renders the class's own Points; the TSL
+// page derives the install from them and renders the
+// kuiper-belt.tsl.js factories over the same arrays.
+
+const REVISION = "186";
+const status = document.getElementById("status");
+const canvas = document.getElementById("c");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") || "glsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 160) | 0));
+
+const ET = jd => (jd - J2000) * DAY;
+const CASES = [
+  { kind: "background-overview", et: ET(2460000), show: ["background"],
+    cam: [0, 38000, 82000], tgt: [0, 0, 0], near: 10, far: 600000 },
+  { kind: "background-close", et: ET(2460000), show: ["background"],
+    camAt: { mode: "background", dist: 600 }, near: 0.5, far: 600000 },
+  { kind: "known-points", et: ET(2460000), show: ["known"], focusedKey: "",
+    camAt: { mode: "known", index: 3, dist: 1200 }, near: 1, far: 600000 },
+  { kind: "known-focused", et: ET(2461500), show: ["background", "known"],
+    focusedKey: "kuiperbelt",
+    camAt: { mode: "known", index: 3, dist: 2500 }, near: 1, far: 600000 },
+  { kind: "out-of-coverage", et: ET(J2000) - 400 * DAY, show: ["background", "known"],
+    cam: [55000, 26000, 30000], tgt: [0, 0, 0], near: 10, far: 600000 },
+  { kind: "occluder-logdepth", et: ET(2460000), show: ["background"],
+    cam: [0, 16000, 42000], tgt: [20000, 0, -20000], near: 10, far: 600000,
+    occluder: true }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5kb = { done: false, error: null };
+
+function hashArrays(arrays) {
+  let h = 0x811c9dc5;
+  for (const a of arrays) {
+    const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    for (let i = 0; i < bytes.length; i++) {
+      h ^= bytes[i];
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+const r9 = v => Math.round(v * 1e9) / 1e9;
+
+// Synthetic KBOHERM1 ephemeris standing in for the
+// user-install data file: 24 circular-ish bodies at
+// 34--55 AU with pos/vel samples consistent under the
+// Hermite rule KuiperTable evaluates.
+function buildEphemerisFixture() {
+  const count = 24, samples = 24, startJD = J2000, stepDays = 2000;
+  const bytes = new ArrayBuffer(40 + count * samples * 6 * 8);
+  const dv = new DataView(bytes);
+  new Uint8Array(bytes).set(new TextEncoder().encode("KBOHERM1"), 0);
+  dv.setUint32(8, 1, true);
+  dv.setUint32(12, count, true);
+  dv.setUint32(16, samples, true);
+  dv.setFloat64(24, startJD, true);
+  dv.setFloat64(32, stepDays, true);
+  const vals = new Float64Array(bytes, 40);
+  for (let j = 0; j < count; j++) {
+    const a = 34 + j * 0.9;
+    const n = 0.01720209895 / Math.pow(a, 1.5);
+    const ph = j * 2.399963;
+    const inc = (j % 7) * 0.06;
+    const ci = Math.cos(inc), si = Math.sin(inc);
+    for (let sI = 0; sI < samples; sI++) {
+      const th = ph + n * stepDays * sI;
+      vals.set([
+        a * Math.cos(th), a * Math.sin(th) * ci, a * Math.sin(th) * si,
+        -a * n * Math.sin(th), a * n * Math.cos(th) * ci, a * n * Math.cos(th) * si
+      ], (j * samples + sI) * 6);
+    }
+  }
+  const meta = {
+    format: "kuiper-hermite-v1",
+    count, samplesPerBody: samples, startJD, stepDays,
+    coverageStartJD: startJD,
+    coverageEndJD: startJD + (samples - 1) * stepDays,
+    objects: Array.from({ length: count }, (_, j) => ({ name: "Rig KBO " + j })),
+    validation: { maxKm: 0, samples: 0 }
+  };
+  return { bytes, meta };
+}
+
+function installDataFixture() {
+  const { bytes, meta } = buildEphemerisFixture();
+  const realFetch = window.fetch.bind(window);
+  window.fetch = (input, init) => {
+    const url = String(typeof input === "string" ? input : (input?.url ?? input));
+    if (url.includes("data/kuiper/kuiper-meta.json")) {
+      return Promise.resolve(new Response(JSON.stringify(meta),
+        { status: 200, headers: { "Content-Type": "application/json" } }));
+    }
+    if (url.includes("data/kuiper/kuiper-1800-2200.bin")) {
+      return Promise.resolve(new Response(bytes.slice(0),
+        { status: 200, headers: { "Content-Type": "application/octet-stream" } }));
+    }
+    return realFetch(input, init);
+  };
+}
+
+// Measures where the classic GPU vertex actually puts
+// a background body, via transform feedback on
+// production's own background vertex shader with one
+// assignment-expression splice. Same sandbox
+// software-trig displacement as P5e23 (05-HOW-I-WORK
+// probe rule 10), ~10x larger at Kuiper radii: CPU
+// aims are useless for the close case on every page,
+// the measured GPU position is shared by both
+// backends' software paths.
+let tfMeasure = null;
+function measureGpuPosition(material, install, index, days) {
+  if (!tfMeasure) {
+    const cv = document.createElement("canvas");
+    const gl = cv.getContext("webgl2");
+    if (!gl) throw new Error("webgl2 unavailable for TF aim measure");
+    const anchor = "vec3(X,Z,-Y)*uAU";
+    const src0 = material.vertexShader;
+    if (src0.split(anchor).length !== 2) throw new Error("TF splice anchor missing");
+    const vs = "#version 300 es\nprecision highp float;\nprecision highp int;\n" +
+      "#define attribute in\n#define varying out\n" +
+      "attribute vec3 position;\nattribute vec3 normal;\n" +
+      "uniform mat4 modelViewMatrix;\nuniform mat4 projectionMatrix;\n" +
+      "out vec3 oScenePos;\n" +
+      src0.replace(anchor, "(oScenePos = " + anchor + ")");
+    const fs = "#version 300 es\nprecision highp float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }";
+    const sh = (t, s2) => {
+      const h = gl.createShader(t); gl.shaderSource(h, s2); gl.compileShader(h);
+      if (!gl.getShaderParameter(h, gl.COMPILE_STATUS)) throw new Error("TF shader: " + gl.getShaderInfoLog(h));
+      return h;
+    };
+    const pr = gl.createProgram();
+    gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs));
+    gl.transformFeedbackVaryings(pr, ["oScenePos"], gl.SEPARATE_ATTRIBS);
+    gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error("TF link: " + gl.getProgramInfoLog(pr));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const outBuf = gl.createBuffer();
+    const tf = gl.createTransformFeedback();
+    tfMeasure = { gl, pr, vao, outBuf, tf };
+  }
+  const { gl, pr, vao, outBuf, tf } = tfMeasure;
+  gl.useProgram(pr); gl.bindVertexArray(vao);
+  const feed = (name, data, comps) => {
+    const loc = gl.getAttribLocation(pr, name);
+    if (loc < 0) return;
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, comps, gl.FLOAT, false, 0, 0);
+  };
+  feed("position", new Float32Array([0, 0, 0]), 3);
+  feed("normal", new Float32Array([0, 1, 0]), 3);
+  feed("aOrbit", install.background.orbit.slice(index * 4, index * 4 + 4), 4);
+  feed("aPhase", install.background.phase.slice(index * 4, index * 4 + 4), 4);
+  gl.uniform1f(gl.getUniformLocation(pr, "uDays"), days);
+  gl.uniform1f(gl.getUniformLocation(pr, "uAU"), install.uniforms.au);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+  gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, outBuf);
+  gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, 12, gl.DYNAMIC_READ);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outBuf);
+  gl.enable(gl.RASTERIZER_DISCARD);
+  gl.beginTransformFeedback(gl.POINTS);
+  gl.drawArrays(gl.POINTS, 0, 1);
+  gl.endTransformFeedback();
+  gl.disable(gl.RASTERIZER_DISCARD);
+  const out = new Float32Array(3);
+  gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, out);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+  return new THREE.Vector3(out[0], out[1], out[2]);
+}
+
+async function buildSystem() {
+  installDataFixture();
+  const solarSystem = new THREE.Group();
+  const kb = new KuiperBelt({
+    THREE,
+    solarSystem,
+    objectRegistry: {},
+    bodyFacts: {},
+    renderer: { getPixelRatio: () => 1 },
+    au: 1200,
+    CSS2DObject: null,
+    labelObjects: null,
+    onFactsChange: undefined
+  });
+  kb.rebuild(true);
+  await kb.loading;
+  if (!kb.table) throw new Error("fixture ephemeris did not load: " + kb.error);
+  kb.update({ enabled: true, et: cfg.et, showLabels: false, focusedKey: cfg.focusedKey || "" });
+  if (!kb.known) throw new Error("known points were not built");
+
+  kb.background.visible = kb.background.visible && cfg.show.includes("background");
+  kb.known.visible = kb.known.visible && cfg.show.includes("known");
+
+  const install = deriveKuiperInstall(kb);
+  const days = install.uniforms.days;
+
+  let camPos, camTgt;
+  if (cfg.camAt?.mode === "background") {
+    let li = -1;
+    for (let i = 0; i < install.background.count; i++) {
+      const a = install.background.orbit[i * 4];
+      if (a > 43 && a < 45) { li = i; break; }
+    }
+    if (li < 0) throw new Error("no aim body found");
+    camTgt = measureGpuPosition(kb.background.material, install, li, days);
+    const out = camTgt.clone().normalize();
+    const right = new THREE.Vector3().crossVectors(out, new THREE.Vector3(0, 1, 0)).normalize();
+    const dir = out.multiplyScalar(0.6).addScaledVector(right, 0.35)
+      .add(new THREE.Vector3(0, 0.45, 0)).normalize();
+    camPos = camTgt.clone().addScaledVector(dir, cfg.camAt.dist);
+  } else if (cfg.camAt?.mode === "known") {
+    const k = cfg.camAt.index * 3;
+    camTgt = new THREE.Vector3(
+      install.known.positions[k], install.known.positions[k + 1], install.known.positions[k + 2]);
+    const out = camTgt.clone().normalize();
+    const right = new THREE.Vector3().crossVectors(out, new THREE.Vector3(0, 1, 0)).normalize();
+    const dir = out.multiplyScalar(0.6).addScaledVector(right, 0.35)
+      .add(new THREE.Vector3(0, 0.45, 0)).normalize();
+    camPos = camTgt.clone().addScaledVector(dir, cfg.camAt.dist);
+  } else {
+    camPos = new THREE.Vector3(...cfg.cam);
+    camTgt = new THREE.Vector3(...cfg.tgt);
+  }
+
+  const digest = [
+    hashArrays([install.background.orbit, install.background.phase,
+      ...(install.known ? [install.known.positions] : [])]),
+    String(install.background.count),
+    String(install.known ? install.known.count : 0),
+    r9(cfg.et), r9(days),
+    r9(camPos.x), r9(camPos.y), r9(camPos.z)
+  ].join(":");
+
+  return { kb, solarSystem, install, camPos, camTgt, digest, days };
+}
+
+function checkDerivation(sys) {
+  const { kb, install } = sys;
+  const eq = (a, b, k) => { if (a !== b) throw new Error(`derive ${k}: ${a} vs ${b}`); };
+  eq(install.uniforms.days, kb.background.material.uniforms.uDays.value, "uDays");
+  eq(install.uniforms.au, kb.background.material.uniforms.uAU.value, "uAU");
+  eq(install.uniforms.backgroundPixels, kb.background.material.uniforms.uPixels.value, "bg uPixels");
+  eq(install.uniforms.knownPixels, kb.known.material.uniforms.uPixels.value, "known uPixels");
+  eq(install.background.count, 10000, "background count");
+  eq(install.known.count, 24, "known count");
+  if (install.background.orbit !== kb.background.geometry.attributes.aOrbit.array) throw new Error("orbit identity");
+  if (install.background.phase !== kb.background.geometry.attributes.aPhase.array) throw new Error("phase identity");
+  if (install.known.positions !== kb.positions) throw new Error("positions identity");
+}
+
+function makeCamera(NS, sys) {
+  const camera = new NS.PerspectiveCamera(40, 1, cfg.near, cfg.far);
+  camera.position.set(sys.camPos.x, sys.camPos.y, sys.camPos.z);
+  camera.lookAt(sys.camTgt.x, sys.camTgt.y, sys.camTgt.z);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  return camera;
+}
+
+function buildGlslScene(sys) {
+  const scene = new THREE.Scene();
+  scene.add(sys.solarSystem);
+  if (cfg.occluder) {
+    const dir = sys.camTgt.clone().sub(sys.camPos).normalize();
+    const occ = new THREE.Mesh(
+      new THREE.SphereGeometry(5000, 32, 16),
+      new THREE.MeshBasicMaterial());
+    occ.material.color.setRGB(0.04, 0.04, 0.045);
+    occ.position.copy(sys.camPos).addScaledVector(dir, 22000);
+    occ.updateMatrixWorld(true);
+    scene.add(occ);
+  }
+  return { scene, camera: makeCamera(THREE, sys) };
+}
+
+function buildTslScene(sys) {
+  const { kb, install } = sys;
+  const scene = new NodeScene();
+  const days = uniform(install.uniforms.days);
+  const viewport = uniform(new NodeNS.Vector2(size, size));
+  const prop = createKuiperPropagation({ days, au: install.uniforms.au });
+
+  const slotMaterial = (slots, state) => {
+    const m = new MeshBasicNodeMaterial();
+    m.vertexNode = slots.vertexNode;
+    m.colorNode = slots.colorNode;
+    if (slots.depthNode) m.depthNode = slots.depthNode;
+    m.transparent = state.transparent;
+    m.depthWrite = state.depthWrite;
+    m.depthTest = state.depthTest;
+    m.blending = NodeNormalBlending;
+    m.premultipliedAlpha = false;
+    m.toneMapped = false;
+    return m;
+  };
+
+  const rootVisible = install.visible.root;
+  {
+    const geo = createKuiperBackgroundGeometry(NodeNS, install.background);
+    geo.boundingSphere = new NodeNS.Sphere(new NodeNS.Vector3(0, 0, 0), 72 * install.uniforms.au);
+    const mesh = new NodeMesh(geo, slotMaterial(
+      createKuiperBackground({
+        propagation: prop,
+        pixels: uniform(install.uniforms.backgroundPixels),
+        viewport
+      }), install.states.background));
+    mesh.frustumCulled = true;
+    mesh.visible = rootVisible && install.visible.background;
+    scene.add(mesh);
+  }
+  if (install.known) {
+    const geo = createKuiperKnownGeometry(NodeNS, install.known.positions, install.known.count);
+    const bs = kb.known.geometry.boundingSphere;
+    geo.boundingSphere = new NodeNS.Sphere(
+      new NodeNS.Vector3(bs.center.x, bs.center.y, bs.center.z), bs.radius);
+    const mesh = new NodeMesh(geo, slotMaterial(
+      createKuiperKnown({
+        pixels: uniform(install.uniforms.knownPixels),
+        viewport
+      }), install.states.known));
+    mesh.frustumCulled = true;
+    mesh.visible = rootVisible && install.visible.known;
+    scene.add(mesh);
+  }
+  if (cfg.occluder) {
+    const occMat = new MeshBasicNodeMaterial();
+    occMat.color.setRGB(0.04, 0.04, 0.045);
+    const occ = new NodeMesh(new NodeSphereGeometry(5000, 32, 16), occMat);
+    const dir = sys.camTgt.clone().sub(sys.camPos).normalize();
+    occ.position.copy(sys.camPos).addScaledVector(dir, 22000);
+    occ.updateMatrixWorld(true);
+    scene.add(occ);
+  }
+  return { scene, camera: makeCamera(NodeNS, sys) };
+}
+
+try {
+  const sys = await buildSystem();
+  checkDerivation(sys);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(sys) : buildTslScene(sys);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5kb = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    digest: sys.digest,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e24 kuiper-belt ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5kb = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e24 kuiper-belt error: " + window.__p5kb.error;
+}
+</script>
+</body>
+</html>

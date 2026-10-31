@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c8 — satellite Eclipse application GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c8 satellite Eclipse application starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createSatelliteEclipse } from "../src/bodies/planets/moon-eclipses.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  REVISION
+} from "three/webgpu";
+import { sin, uv, vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+// View-space sun/casters (xyz centre, w radius), as MoonEclipses.update
+// computes them. The receiver is the fragment's own view position under a
+// rotated/perspective view, so the production vertex varying and the TSL
+// positionView source are compared, not synthetic receiver positions.
+// Cases: three active casters; the ring install (emissive also scaled);
+// disabled; one caster with a moved sun.
+const CASTERS = [
+  [0.30, 0.15, -16.0, 1.40],
+  [-4.50, 2.20, -18.0, 1.80],
+  [12.0, 7.0, -20.0, 1.00]
+];
+const CASES = [
+  { sunView: [0.5, 0.25, -30.0, 4.0], casters: CASTERS, casterCount: 3, enabled: 1, ring: false },
+  { sunView: [0.5, 0.25, -30.0, 4.0], casters: CASTERS, casterCount: 3, enabled: 1, ring: true },
+  { sunView: [0.5, 0.25, -30.0, 4.0], casters: CASTERS, casterCount: 3, enabled: 0, ring: false },
+  { sunView: [-1.0, -0.5, -24.0, 2.8], casters: CASTERS, casterCount: 1, enabled: 1, ring: false }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5apply = { done: false, error: null };
+
+async function loadProductionParts() {
+  // Extract the exact GLSL template literal and the exact application
+  // string literals from moon-eclipses.js.
+  const text = await fetch("../src/bodies/planets/moon-eclipses.js").then(r => {
+    if (!r.ok) throw new Error("moon-eclipses.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const glslAt = text.indexOf("const GLSL = ");
+  const tick = text.indexOf(tickChar, glslAt);
+  const end = text.indexOf(tickChar, tick + 1);
+  if (glslAt < 0 || tick < 0 || end < 0) throw new Error("GLSL literal bounds not found");
+  const glsl = Function("return " + text.slice(tick, end + 1))();
+  if (!glsl.includes("satelliteSunVisibility")) throw new Error("extracted GLSL is not the visibility code");
+  const stringContaining = marker => {
+    const at = text.indexOf(marker);
+    if (at < 0) throw new Error("marker not found: " + marker);
+    const open = text.lastIndexOf('"', at);
+    const close = text.indexOf('"', at);
+    if (open < 0 || close < 0) throw new Error("string bounds not found: " + marker);
+    return Function("return " + text.slice(open, close + 1))();
+  };
+  const vertexLine = stringContaining("vSatelliteReceiverView=(modelViewMatrix*vec4(transformed,1.0)).xyz;");
+  const applyVisibility = stringContaining("float satelliteVisibility=satelliteSunVisibility(vSatelliteReceiverView);");
+  const applyDiffuse = stringContaining("reflectedLight.directDiffuse *= satelliteVisibility;");
+  const applySpecular = stringContaining("reflectedLight.directSpecular *= satelliteVisibility;");
+  const applyEmissive = stringContaining("totalEmissiveRadiance *= satelliteVisibility;");
+  return { glsl, vertexLine, applyVisibility, applyDiffuse, applySpecular, applyEmissive };
+}
+
+function makeCapGeometry(GeometryClass) {
+  const geometry = new GeometryClass(2, 2, 160, 160);
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i) * 1.15;
+    const y = pos.getY(i) * 1.15;
+    const len = Math.hypot(x, y, 0.75);
+    pos.setXYZ(i, x / len, y / len, 0.75 / len);
+  }
+  pos.needsUpdate = true;
+  return geometry;
+}
+
+function casterUniforms() {
+  const arr = cfg.casters.map(c => new THREE.Vector4(c[0], c[1], c[2], c[3]));
+  while (arr.length < 8) arr.push(new THREE.Vector4());
+  return arr;
+}
+
+function makeGlslMaterial(parts) {
+  // The production vertex line references `transformed` (three's
+  // begin_vertex name for the position); define it from position, then use
+  // the extracted line verbatim.
+  return new THREE.ShaderMaterial({
+    name: "P5c8 satellite-Eclipse application GLSL reference",
+    uniforms: {
+      uSatelliteEclipsesOn: { value: cfg.enabled },
+      uSatelliteSunView: { value: new THREE.Vector4(...cfg.sunView) },
+      uSatelliteCasterCount: { value: cfg.casterCount },
+      uSatelliteCasters: { value: casterUniforms() }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vSatelliteReceiverView;
+      void main() {
+        vUv = uv;
+        vec3 transformed = position;
+        ${parts.vertexLine}
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      ${parts.glsl}
+      struct ReflectedLight { vec3 directDiffuse; vec3 directSpecular; };
+      void main() {
+        ReflectedLight reflectedLight;
+        reflectedLight.directDiffuse = vec3(0.45 + 0.35 * sin(vUv.x * 37.0), 0.45 + 0.35 * sin(vUv.y * 43.0 + 1.3), 0.45 + 0.35 * sin((vUv.x + vUv.y) * 29.0 + 2.1));
+        reflectedLight.directSpecular = vec3(0.45 + 0.35 * sin(vUv.y * 31.0 + 0.7), 0.45 + 0.35 * sin(vUv.x * 53.0 + 2.9), 0.45 + 0.35 * sin((vUv.x - vUv.y) * 41.0 + 4.0));
+        vec3 totalEmissiveRadiance = vec3(0.45 + 0.35 * sin((vUv.x + 2.0 * vUv.y) * 23.0 + 0.3), 0.45 + 0.35 * sin(vUv.x * 61.0 + 5.1), 0.45 + 0.35 * sin(vUv.y * 47.0 + 3.3));
+        ${parts.applyVisibility}
+        ${parts.applyDiffuse}
+        ${parts.applySpecular}
+        ${cfg.ring ? parts.applyEmissive : ""}
+        gl_FragColor = vec4((reflectedLight.directDiffuse + reflectedLight.directSpecular + totalEmissiveRadiance) * 0.3, 1.0);
+      }
+    `
+  });
+}
+
+const member = (node, name) => typeof node.get === "function" ? node.get(name) : node[name];
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P5c8 satellite-Eclipse application TSL" });
+  const Eclipse = createSatelliteEclipse({
+    sunView: cfg.sunView,
+    casters: cfg.casters,
+    casterCount: cfg.casterCount,
+    enabled: cfg.enabled,
+    affectEmissive: cfg.ring
+  });
+  const pUv = uv();
+  const diffuse = vec3(
+    float(0.45).add(sin(pUv.x.mul(37.0)).mul(0.35)),
+    float(0.45).add(sin(pUv.y.mul(43.0).add(1.3)).mul(0.35)),
+    float(0.45).add(sin(pUv.x.add(pUv.y).mul(29.0).add(2.1)).mul(0.35)));
+  const specular = vec3(
+    float(0.45).add(sin(pUv.y.mul(31.0).add(0.7)).mul(0.35)),
+    float(0.45).add(sin(pUv.x.mul(53.0).add(2.9)).mul(0.35)),
+    float(0.45).add(sin(pUv.x.sub(pUv.y).mul(41.0).add(4.0)).mul(0.35)));
+  const emissive = vec3(
+    float(0.45).add(sin(pUv.x.add(pUv.y.mul(2.0)).mul(23.0).add(0.3)).mul(0.35)),
+    float(0.45).add(sin(pUv.x.mul(61.0).add(5.1)).mul(0.35)),
+    float(0.45).add(sin(pUv.y.mul(47.0).add(3.3)).mul(0.35)));
+  const applied = Eclipse.satelliteEclipseApplyAtPositionView(diffuse, specular, emissive);
+  const summed = member(applied, "directDiffuse")
+    .add(member(applied, "directSpecular"))
+    .add(member(applied, "emissive"));
+  material.colorNode = vec4(summed.mul(0.3), float(1.0));
+  return material;
+}
+
+try {
+  const parts = impl === "glsl" ? await loadProductionParts() : null;
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  let scene, camera, mesh, material;
+  const setupView = (sceneObj, cameraObj, meshObj) => {
+    // Off-axis perspective view + rotated/scaled mesh: the modelView
+    // transform is genuinely nontrivial. The cap overfills the frame.
+    cameraObj.position.set(1.5, 0.7, 2.5);
+    cameraObj.lookAt(0, 0, 0);
+    meshObj.rotation.set(0.25, -0.18, 0.10);
+    meshObj.scale.setScalar(2.4);
+    sceneObj.add(meshObj);
+  };
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(24, 1, 0.1, 100);
+    material = makeGlslMaterial(parts);
+    mesh = new THREE.Mesh(makeCapGeometry(THREE.PlaneGeometry), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(24, 1, 0.1, 100);
+    material = makeTslMaterial();
+    mesh = new NodeMesh(makeCapGeometry(NodePlaneGeometry), material);
+  }
+  setupView(scene, camera, mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5apply = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    casterCount: cfg.casterCount,
+    enabled: cfg.enabled,
+    ring: cfg.ring,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c8 satellite Eclipse application ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5apply = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c8 satellite Eclipse application error: " + window.__p5apply.error;
+}
+</script>
+</body>
+</html>

@@ -150,8 +150,10 @@ export class SolarEphemerisLayer {
                 const T = this.THREE, line = new T.LineLoop(OrbitGeometry.createAnchoredOrbitGeometry(T, OrbitGeometry.ORBIT_LINE_SEGMENTS), new T.LineBasicMaterial({
                     color: 11647945,
                     transparent: true,
-                    opacity: .3,
-                    depthWrite: false
+                    opacity: .55,
+                    blending: T.AdditiveBlending,
+                    depthWrite: false,
+                    toneMapped: false
                 }));
                 line.raycast = () => {};
                 line.visible = false;
@@ -200,8 +202,10 @@ export class SolarEphemerisLayer {
         const material = new T.LineBasicMaterial({
             color: 11647945,
             transparent: true,
-            opacity: .3,
-            depthWrite: false
+            opacity: .55,
+            blending: T.AdditiveBlending,
+            depthWrite: false,
+            toneMapped: false
         });
         const line = new T.Line(geometry, material);
         line.raycast = () => {};
@@ -276,6 +280,7 @@ export class SolarEphemerisLayer {
         return this.available;
     }
     reportReadyStatus(ms) {
+        if (!this.snapshot) return;
         const lag = Math.abs(ms - this.snapshot.ms), stamp = new Date(this.snapshot.ms).toISOString().replace(".000Z", "Z");
         this.status("ready", lag > 1e3 ? `Calculating… displayed epoch ${stamp}. No extrapolation. Analytical accuracy varies; Neptune interpolation < 1 km.` : "Local ephemerides ready. Analytical accuracy varies; Neptune interpolation < 1 km. Moon paths appear when focusing a moon or its parent.");
     }

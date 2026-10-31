@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e22 — volumetric cloud shell GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+<script src="../src/render/clouds/cloud-types.js"></script>
+<script src="../src/render/clouds/cloud-motion.js"></script>
+<script src="../src/render/clouds/cloud-volume.js"></script>
+<script src="../src/render/clouds/cloud-raymarch.js"></script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e22 cloud raymarch starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  createCloudRaymarch,
+  deriveCloudShellInstall,
+  deriveCloudShellFrame
+} from "../src/render/clouds/cloud-raymarch.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Color as NodeColor,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+const NS = impl === "glsl" ? THREE : NodeNS;
+
+// The volumetric cloud shell (createCloudShell + the wind
+// chunk it splices) against the TSL factory. Both pages bake
+// a real volume with production's createCloudVolume from the
+// same synthetic fields (digest-hashed), run production's
+// createCloudMotion to the same frozen cloud clock, and
+// build production's real shell over a translated, scaled
+// stub body so the per-frame hook's centre/scale arithmetic
+// is exercised. deriveCloudShellInstall is checked against
+// the pristine production material in page; the frame hook
+// is then run for real and deriveCloudShellFrame checked
+// against what it wrote. The classic page renders the
+// production shell as built; the node page renders
+// createCloudRaymarch over the derived install with the
+// derived frame applied (the production shell rides along
+// invisible as the hook reference).
+//
+// The coverage fields are painted symmetric in |latitude|:
+// the bake reads its maps top-row-north while the deck is a
+// flipY CanvasTexture, and the proof must not hinge on
+// which of production's two conventions a blob lands in.
+// Cases:
+//   0 orbit day side          3 terminator crescent
+//   1 limb, forward scatter   4 debug mode 2 (coverage)
+//   2 inside the deck         5 debug mode 1 (magenta)
+const CASES = [
+  { kind: "orbit-day", altKm: 1800, lat: 20, lon: 0.30, sunLat: 15, sunLon: 0.38 },
+  { kind: "limb-forward", altKm: 350, lat: 18, lon: 0.30, tLon: 0.36, sunLat: 10, sunLon: 0.44, uOpacity: 0.85 },
+  { kind: "inside-close", altKm: 6, lat: 20, lon: 0.30, tLat: 21.5, tLon: 0.318, sunLat: 35, sunLon: 0.32, shellOptions: { maxSteps: 48, lightSteps: 3 } },
+  { kind: "terminator", altKm: 1800, lat: 20, lon: 0.30, sunLat: -8, sunLon: 0.72 },
+  { kind: "debug-coverage", altKm: 1800, lat: 20, lon: 0.30, sunLat: 15, sunLon: 0.38, uDebug: 2 },
+  { kind: "debug-magenta", altKm: 1800, lat: 20, lon: 0.30, sunLat: 15, sunLon: 0.38, uDebug: 1 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5crm = { done: false, error: null };
+
+const BODY_R = 10;
+const RADIUS_KM = 6371;
+const BODY_POS = [3, -2, 5];
+const BODY_SCALE = 1.7;
+const FIELD_W = 512, FIELD_H = 256;
+
+function hashArray(a) {
+  let h = 2166136261 >>> 0;
+  const step = Math.max(1, Math.floor(a.length / 8192));
+  for (let i = 0; i < a.length; i += step) {
+    h ^= a[i] & 0xff;
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h.toString(16) + ":" + a.length;
+}
+const r12 = v => Number(v.toPrecision(12));
+
+// Direction for a latitude/longitude in the shader's own
+// convention: lon turns = atan(x, z) / 2PI + 0.5.
+function dirFromLatLon(latDeg, lonTurns) {
+  const phi = latDeg * Math.PI / 180;
+  const theta = (lonTurns - 0.5) * 2 * Math.PI;
+  return new NS.Vector3(
+    Math.sin(theta) * Math.cos(phi),
+    Math.sin(phi),
+    Math.cos(theta) * Math.cos(phi)
+  );
+}
+
+function blobField(u, absLat, blobs) {
+  let v = 0;
+  for (const [cu, clat, ru, rlat, amp] of blobs) {
+    let du = Math.abs(u - cu);
+    du = Math.min(du, 1 - du);
+    const d2 = (du / ru) ** 2 + ((absLat - clat) / rlat) ** 2;
+    v += amp * Math.exp(-d2 * 2.2);
+  }
+  return v;
+}
+
+// One synthetic sky, the same bytes on both pages: three
+// etage coverage fields with distinct geography, a storm-top
+// field, and a genus/tropopause map.
+function buildFields() {
+  const cv = document.createElement("canvas");
+  cv.width = FIELD_W; cv.height = FIELD_H;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  const img = ctx.createImageData(FIELD_W, FIELD_H);
+  const top = new Uint8ClampedArray(FIELD_W * FIELD_H * 4);
+  const types = new Uint8ClampedArray(FIELD_W * FIELD_H * 4);
+  const lowBlobs = [[0.30, 20, 0.055, 13, 0.95], [0.58, 38, 0.09, 16, 0.8], [0.83, 8, 0.06, 10, 0.7]];
+  const midBlobs = [[0.36, 28, 0.08, 15, 0.85], [0.68, 14, 0.07, 12, 0.75], [0.08, 45, 0.1, 14, 0.65]];
+  const highBlobs = [[0.30, 22, 0.11, 17, 0.8], [0.75, 30, 0.13, 18, 0.7], [0.5, 5, 0.09, 9, 0.55]];
+  for (let y = 0; y < FIELD_H; y++) {
+    const lat = 90 - (y + 0.5) / FIELD_H * 180;
+    const aLat = Math.abs(lat);
+    for (let x = 0; x < FIELD_W; x++) {
+      const u = (x + 0.5) / FIELD_W;
+      const i = (y * FIELD_W + x) * 4;
+      const bl1 = (aLat - 18) / 16, bl2 = (aLat - 52) / 13;
+      const bandLow = 0.30 * Math.exp(-(bl1 * bl1)) + 0.16 * Math.exp(-(bl2 * bl2));
+      const bm = (aLat - 34) / 18;
+      const bandMid = 0.24 * Math.exp(-(bm * bm));
+      const bh = (aLat - 24) / 22;
+      const bandHigh = 0.26 * Math.exp(-(bh * bh));
+      const hu = (u - 0.47) / 0.05, hv = (aLat - 20) / 9;
+      const hole = Math.exp(-((hu * hu + hv * hv) * 2.0));
+      const cl = Math.max(0, Math.min(1, bandLow + blobField(u, aLat, lowBlobs) - 0.75 * hole));
+      const cm = Math.max(0, Math.min(1, bandMid + blobField(u, aLat, midBlobs) - 0.5 * hole));
+      const ch = Math.max(0, Math.min(1, bandHigh + blobField(u, aLat, highBlobs)));
+      img.data[i] = Math.round(cl * 255);
+      img.data[i + 1] = Math.round(cm * 255);
+      img.data[i + 2] = Math.round(ch * 255);
+      img.data[i + 3] = 255;
+      const storm = blobField(u, aLat, [[0.30, 20, 0.045, 11, 8.5], [0.58, 38, 0.07, 13, 4.5]]);
+      top[i] = Math.round(Math.max(0, Math.min(1, (3.2 + storm) / 20)) * 255);
+      top[i + 3] = 255;
+      const alt = aLat > 24 && aLat < 55 && u > 0.5;
+      types[i] = alt ? 3 : 1;
+      types[i + 1] = alt ? 7 : 6;
+      types[i + 2] = alt ? 10 : 9;
+      types[i + 3] = Math.round((16 - 8 * Math.min(1, aLat / 75)) / 20 * 255);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return { canvas: cv, coverage2D: img.data, topKm2D: top, typeMap2D: types };
+}
+
+function buildSystem() {
+  const fields = buildFields();
+  const volume = globalThis.createCloudVolume(NS, {
+    width: 96, height: 48, depth: 48, detailSize: 32,
+    coverage2D: fields.coverage2D, coverageW: FIELD_W, coverageH: FIELD_H,
+    typeMap2D: fields.typeMap2D, typeW: FIELD_W, typeH: FIELD_H,
+    topKm2D: fields.topKm2D, topW: FIELD_W, topH: FIELD_H
+  });
+  // The detail tile is the one input the vendored three
+  // r186 WebGPU backend cannot carry: its generateMipmaps
+  // builds 2d-array views of a 3D texture (GPU validation
+  // error, measured) and its Data3DTexture upload ignores
+  // provided mipmaps entirely. Pin the tile to a single
+  // level on every page so both marches sample identical
+  // detail; carrying the mip chain becomes a three
+  // patch/upgrade at flip time (roadmap S10.54).
+  volume.detailTexture.generateMipmaps = false;
+  volume.detailTexture.mipmaps = [];
+  volume.detailTexture.minFilter = NS.LinearFilter;
+  volume.detailTexture.needsUpdate = true;
+  const deckTex = new NS.CanvasTexture(fields.canvas);
+  deckTex.colorSpace = NS.SRGBColorSpace;
+  deckTex.wrapS = NS.RepeatWrapping;
+
+  const motion = globalThis.createCloudMotion(NS, {});
+  motion.setViewLatitude(35);
+  motion.advance(21600, 12, 10);
+  motion.advance(3600, 12, 2);
+
+  const body = new NS.Group();
+  body.position.set(BODY_POS[0], BODY_POS[1], BODY_POS[2]);
+  body.scale.setScalar(BODY_SCALE);
+  const planetMat = new NS.MeshBasicMaterial();
+  planetMat.color.setRGB(0.04, 0.07, 0.13);
+  const planet = new NS.Mesh(new NS.SphereGeometry(BODY_R, 64, 32), planetMat);
+  body.add(planet);
+
+  const shell = globalThis.createCloudShell(NS, {
+    motionUniforms: motion.uniforms,
+    volume,
+    coverageTexture: deckTex,
+    radiusKm: RADIUS_KM,
+    maxRadiusKm: RADIUS_KM,
+    planetRadius: BODY_R,
+    ...(cfg.shellOptions || {})
+  });
+  if (!shell) throw new Error("createCloudShell returned null");
+  if (cfg.uDebug !== undefined) shell.material.uniforms.uDebug.value = cfg.uDebug;
+  if (cfg.uOpacity !== undefined) shell.material.uniforms.uOpacity.value = cfg.uOpacity;
+  body.add(shell);
+
+  const scene = new NS.Scene();
+  scene.add(body);
+  const centre = new NS.Vector3(BODY_POS[0], BODY_POS[1], BODY_POS[2]);
+  const light = new NS.DirectionalLight(0xffffff, 2.5);
+  light.color.setRGB(1.0, 0.96, 0.9);
+  light.position.copy(centre).addScaledVector(dirFromLatLon(cfg.sunLat, cfg.sunLon), 500);
+  scene.add(light);
+
+  const camDir = dirFromLatLon(cfg.lat, cfg.lon);
+  const camDist = BODY_R * BODY_SCALE * (1 + cfg.altKm / RADIUS_KM);
+  const camera = new NS.PerspectiveCamera(40, 1, 0.002, 4000);
+  camera.position.copy(centre).addScaledVector(camDir, camDist);
+  const target = dirFromLatLon(cfg.tLat ?? cfg.lat, cfg.tLon ?? cfg.lon)
+    .multiplyScalar(BODY_R * BODY_SCALE).add(centre);
+  camera.lookAt(target);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  body.updateWorldMatrix(true, true);
+
+  const digest = {
+    kind: cfg.kind,
+    bakeHash: hashArray(volume.data),
+    detailHash: hashArray(volume.detailTexture.image.data),
+    convectiveColumns: volume.stats.convectiveColumns,
+    motion: (() => {
+      const s = motion.state();
+      return { clock: r12(s.clockSeconds), belt: r12(s.beltShiftDeg), viewLat: r12(s.viewLatitudeDeg) };
+    })(),
+    camPos: [camera.position.x, camera.position.y, camera.position.z].map(r12)
+  };
+  return { fields, volume, motion, body, shell, scene, light, camera, centre, digest };
+}
+
+// Pristine-material derivation check: throws on any mismatch
+// between deriveCloudShellInstall and the production mesh.
+function checkInstall(sys) {
+  const install = deriveCloudShellInstall(sys.shell);
+  const pm = sys.shell.material;
+  const eq = (a, b, what) => {
+    if (typeof a === "number" && typeof b === "number") {
+      if (r12(a) !== r12(b)) throw new Error(`install ${what}: ${a} vs ${b}`);
+    } else if (a !== b) throw new Error(`install ${what}: ${a} vs ${b}`);
+  };
+  for (const key of Object.keys(pm.uniforms)) {
+    const pv = pm.uniforms[key]?.value;
+    const dv = install.uniforms[key]?.value;
+    if (pv && typeof pv === "object" && "x" in pv) {
+      eq(dv?.x, pv.x, `${key}.x`); eq(dv?.y, pv.y, `${key}.y`); eq(dv?.z, pv.z, `${key}.z`);
+    } else if (pv && typeof pv === "object") {
+      if (dv !== pv) throw new Error(`install ${key}: texture identity`);
+    } else eq(dv, pv, key);
+  }
+  for (const k of ["transparent", "depthWrite", "depthTest", "blending", "blendSrc", "blendDst", "side", "premultipliedAlpha"]) {
+    eq(install.state[k], pm[k], `state.${k}`);
+  }
+  eq(install.geometry.radius, sys.shell.geometry.parameters.radius, "geometry.radius");
+  eq(install.geometry.widthSegments, sys.shell.geometry.parameters.widthSegments, "geometry.widthSegments");
+  eq(install.geometry.heightSegments, sys.shell.geometry.parameters.heightSegments, "geometry.heightSegments");
+  eq(install.meshProps.name, sys.shell.name, "meshProps.name");
+  eq(install.meshProps.frustumCulled, sys.shell.frustumCulled, "meshProps.frustumCulled");
+  eq(install.meshProps.renderOrder, sys.shell.renderOrder, "meshProps.renderOrder");
+  eq(install.frame.planetRadius, BODY_R, "frame.planetRadius");
+  eq(install.frame.radiusKm, RADIUS_KM, "frame.radiusKm");
+  eq(install.frame.shellRadiusKm, RADIUS_KM + 14.5, "frame.shellRadiusKm");
+  return install;
+}
+
+// Run production's frame hook once for real, derive the same
+// frame from the same inputs, and check they agree. Returns
+// the derived frame (the node page applies it).
+function driveFrame(sys, install, renderer) {
+  sys.shell.onBeforeRender(renderer, sys.scene, sys.camera);
+  const pu = sys.shell.material.uniforms;
+  const m = sys.shell.matrixWorld.elements;
+  const camPos = new NS.Vector3();
+  sys.camera.getWorldPosition(camPos);
+  const buf = renderer.getDrawingBufferSize(new NS.Vector2());
+  const lightPos = new NS.Vector3();
+  sys.light.getWorldPosition(lightPos);
+  const frame = deriveCloudShellFrame(install.frame, {
+    centre: { x: m[12], y: m[13], z: m[14] },
+    maxScaleOnAxis: sys.shell.matrixWorld.getMaxScaleOnAxis(),
+    cameraPosition: { x: camPos.x, y: camPos.y, z: camPos.z },
+    drawingBufferHeight: buf.y,
+    fovDeg: sys.camera.fov,
+    wasInside: false,
+    light: {
+      position: { x: lightPos.x, y: lightPos.y, z: lightPos.z },
+      color: { r: sys.light.color.r, g: sys.light.color.g, b: sys.light.color.b },
+      intensity: sys.light.intensity
+    }
+  });
+  const eq = (a, b, what) => { if (r12(a) !== r12(b)) throw new Error(`frame ${what}: derived ${a} vs hook ${b}`); };
+  eq(frame.uCenter.x, pu.uCenter.value.x, "uCenter.x");
+  eq(frame.uCenter.y, pu.uCenter.value.y, "uCenter.y");
+  eq(frame.uCenter.z, pu.uCenter.value.z, "uCenter.z");
+  eq(frame.uShellRadius, pu.uShellRadius.value, "uShellRadius");
+  eq(frame.uPlanetRadius, pu.uPlanetRadius.value, "uPlanetRadius");
+  eq(frame.uKmToWorld, pu.uKmToWorld.value, "uKmToWorld");
+  eq(frame.uPixelKm, pu.uPixelKm.value, "uPixelKm");
+  eq(frame.uSunDir.x, pu.uSunDir.value.x, "uSunDir.x");
+  eq(frame.uSunDir.y, pu.uSunDir.value.y, "uSunDir.y");
+  eq(frame.uSunDir.z, pu.uSunDir.value.z, "uSunDir.z");
+  eq(frame.uSunColor.r, pu.uSunColor.value.x, "uSunColor.r");
+  eq(frame.uSunColor.g, pu.uSunColor.value.y, "uSunColor.g");
+  eq(frame.uSunColor.b, pu.uSunColor.value.z, "uSunColor.b");
+  eq(frame.uSunIntensity, pu.uSunIntensity.value, "uSunIntensity");
+  const expectedSide = frame.sideToApply !== null ? frame.sideToApply : install.state.side;
+  if (sys.shell.material.side !== expectedSide) {
+    throw new Error(`frame side: derived ${expectedSide} vs hook ${sys.shell.material.side}`);
+  }
+  sys.digest.frame = {
+    uShellRadius: r12(frame.uShellRadius),
+    uPlanetRadius: r12(frame.uPlanetRadius),
+    uKmToWorld: r12(frame.uKmToWorld),
+    uPixelKm: r12(frame.uPixelKm),
+    altitudeKm: r12(frame.altitudeKm),
+    inside: frame.inside,
+    sideToApply: frame.sideToApply,
+    hookSide: sys.shell.material.side,
+    sunDir: [frame.uSunDir.x, frame.uSunDir.y, frame.uSunDir.z].map(r12)
+  };
+  return frame;
+}
+
+try {
+  const sys = buildSystem();
+  const install = checkInstall(sys);
+
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const frame = driveFrame(sys, install, renderer);
+
+  if (impl === "tsl") {
+    sys.shell.visible = false;
+    const built = createCloudRaymarch({ T: NodeNS, uniforms: install.uniforms, install });
+    const mesh = new NodeNS.Mesh(
+      new NodeNS.SphereGeometry(install.geometry.radius, install.geometry.widthSegments, install.geometry.heightSegments),
+      built.material
+    );
+    mesh.name = install.meshProps.name;
+    mesh.frustumCulled = install.meshProps.frustumCulled;
+    mesh.renderOrder = install.meshProps.renderOrder;
+    const U = built.uniforms;
+    U.uCenter.value.set(frame.uCenter.x, frame.uCenter.y, frame.uCenter.z);
+    U.uShellRadius.value = frame.uShellRadius;
+    U.uPlanetRadius.value = frame.uPlanetRadius;
+    U.uKmToWorld.value = frame.uKmToWorld;
+    U.uPixelKm.value = frame.uPixelKm;
+    if (frame.uSunDir) {
+      U.uSunDir.value.set(frame.uSunDir.x, frame.uSunDir.y, frame.uSunDir.z);
+      U.uSunColor.value.set(frame.uSunColor.r, frame.uSunColor.g, frame.uSunColor.b);
+      U.uSunIntensity.value = frame.uSunIntensity;
+    }
+    if (frame.sideToApply !== null) built.material.side = frame.sideToApply;
+    sys.body.add(mesh);
+    sys.body.updateWorldMatrix(true, true);
+  }
+
+  for (let i = 0; i < 2; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(sys.scene, sys.camera);
+  }
+
+  window.__p5crm = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null,
+    digest: sys.digest
+  };
+  status.textContent = `P5e22 cloud raymarch ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind} bake=${sys.digest.bakeHash}`;
+  renderer.setAnimationLoop(() => renderer.render(sys.scene, sys.camera));
+} catch (e) {
+  window.__p5crm = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e22 cloud raymarch error: " + window.__p5crm.error;
+}
+</script>
+</body>
+</html>

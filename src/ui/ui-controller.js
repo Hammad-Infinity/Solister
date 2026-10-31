@@ -20,7 +20,7 @@ function refreshPathButtons() {
 
 function refreshDateRow() {
     if (document.activeElement === dateInputEl) return;
-    const ms = solarAccuracy.available ? solarAccuracy.snapshot.ms : simTimeMs;
+    const ms = solarAccuracy.available && solarAccuracy.snapshot ? solarAccuracy.snapshot.ms : simTimeMs;
     if (!Number.isFinite(ms)) return;
     const second = Math.floor(ms / 1e3);
     if (second === dateRenderedSecond && dateInputEl.value) return;
@@ -175,13 +175,6 @@ function applyTargetFps(next) {
     } catch (_) {}
 }
 
-function setSkyTextureSelectValue(value) {
-    if (!skyTextureSelectEl) return;
-    const label = skyTextureSelectEl.querySelector(".tex-select-value");
-    if (label) label.textContent = String(value).toUpperCase();
-    for (const li of skyTextureOptionEls) li.classList.toggle("active", li.dataset.value === value);
-}
-
 function wireSelectMenus() {
     setVisualSelectValue(textureQuality);
     fpsTriggerEl.addEventListener("click", e => {
@@ -201,7 +194,6 @@ function wireSelectMenus() {
         e.stopPropagation();
         bodySelectEl.classList.remove("open");
         fpsSelectEl.classList.remove("open");
-        if (skyTextureSelectEl) skyTextureSelectEl.classList.remove("open");
         if (!visualSelectEl.classList.contains("open")) positionVisualMenu();
         visualSelectEl.classList.toggle("open");
     });
@@ -212,25 +204,6 @@ function wireSelectMenus() {
             applyTextureQuality(next);
         });
     });
-    if (skyTextureSelectEl) {
-        skyTextureSelectEl.addEventListener("click", e => {
-            e.stopPropagation();
-            if (e.target.closest(".tex-select-menu")) return;
-            visualSelectEl.classList.remove("open");
-            fpsSelectEl.classList.remove("open");
-            bodySelectEl.classList.remove("open");
-            if (!skyTextureSelectEl.classList.contains("open")) positionTexMenu(skyTextureSelectEl);
-            skyTextureSelectEl.classList.toggle("open");
-        });
-        for (const li of skyTextureOptionEls) {
-            li.addEventListener("click", () => {
-                skyTextureSelectEl.classList.remove("open");
-                swapSkyResolution(li.dataset.value);
-            });
-        }
-        document.addEventListener("click", () => skyTextureSelectEl.classList.remove("open"));
-        setSkyTextureSelectValue(skyResolution);
-    }
     bodyTriggerEl.addEventListener("click", e => {
         e.stopPropagation();
         const opening = !bodySelectEl.classList.contains("open");
@@ -254,102 +227,13 @@ function wireSelectMenus() {
         if (!fpsSelectEl.contains(e.target)) fpsSelectEl.classList.remove("open");
         if (!visualSelectEl.contains(e.target)) visualSelectEl.classList.remove("open");
         if (!bodySelectEl.contains(e.target)) bodySelectEl.classList.remove("open");
-        for (const selectEl of hdrSelectEls()) {
-            if (!selectEl.contains(e.target)) selectEl.classList.remove("open");
-        }
     });
     document.addEventListener("keydown", e => {
         if (e.key === "Escape") {
             fpsSelectEl.classList.remove("open");
             bodySelectEl.classList.remove("open");
-            for (const selectEl of hdrSelectEls()) selectEl.classList.remove("open");
         }
     });
-    wireHdrControls();
-}
-
-function hdrSelectEls() {
-    return [
-        hdrToggleSelectEl,
-        hdrToneMapSelectEl,
-        hdrAutoExposureSelectEl,
-        hdrExposureSelectEl,
-        hdrKeySelectEl,
-        hdrAdaptSelectEl
-    ].filter(Boolean);
-}
-
-const HDR_ADAPT_LABELS = Object.freeze({ "0.6": "Slow", "1.6": "Medium", "4": "Fast" });
-
-function setHdrSelectValue(selectEl, value, labelOverride = null) {
-    if (!selectEl) return;
-    const options = Array.from(selectEl.querySelectorAll(".tex-select-menu li[data-value]"));
-    const match = options.find(li => li.dataset.value === String(value))
-        || options.find(li => Number.parseFloat(li.dataset.value) === Number.parseFloat(value));
-    const label = selectEl.querySelector(".tex-select-value");
-    if (label) label.textContent = labelOverride || (match ? match.textContent : String(value));
-    selectEl.dataset.value = String(value);
-    options.forEach(li => li.classList.toggle("active", li === match));
-}
-
-function wireHdrControls() {
-    if (!hdrToggleSelectEl) return;
-    const closeAllHdrMenus = () => {
-        for (const selectEl of hdrSelectEls()) selectEl.classList.remove("open");
-    };
-    for (const selectEl of hdrSelectEls()) {
-        if (!selectEl) continue;
-        selectEl.addEventListener("click", event => {
-            event.stopPropagation();
-            if (event.target.closest(".tex-select-menu")) return;
-            visualSelectEl.classList.remove("open");
-            fpsSelectEl.classList.remove("open");
-            bodySelectEl.classList.remove("open");
-            const opening = !selectEl.classList.contains("open");
-            closeAllHdrMenus();
-            if (opening) positionTexMenu(selectEl);
-            selectEl.classList.toggle("open", opening);
-        });
-    }
-    const bind = (selectEl, handler) => {
-        if (!selectEl) return;
-        for (const li of selectEl.querySelectorAll(".tex-select-menu li[data-value]")) {
-            li.addEventListener("click", () => {
-                closeAllHdrMenus();
-                handler(li.dataset.value);
-            });
-        }
-    };
-    bind(hdrToggleSelectEl, value => {
-        hdrPipeline.setEnabled(value === "on");
-        setHdrSelectValue(hdrToggleSelectEl, hdrPipeline.enabled ? "on" : "off");
-    });
-    bind(hdrToneMapSelectEl, value => {
-        hdrPipeline.setToneMapper(value);
-        setHdrSelectValue(hdrToneMapSelectEl, hdrPipeline.toneMapper);
-    });
-    bind(hdrAutoExposureSelectEl, value => {
-        hdrPipeline.setAutoExposure(value === "on");
-        setHdrSelectValue(hdrAutoExposureSelectEl, hdrPipeline.autoExposure ? "on" : "off");
-    });
-    bind(hdrExposureSelectEl, value => {
-        hdrPipeline.setExposure(value);
-        setHdrSelectValue(hdrExposureSelectEl, hdrPipeline.exposure);
-    });
-    bind(hdrKeySelectEl, value => {
-        hdrPipeline.setKeyValue(value);
-        setHdrSelectValue(hdrKeySelectEl, hdrPipeline.keyValue);
-    });
-    bind(hdrAdaptSelectEl, value => {
-        hdrPipeline.setAdaptSpeed(value);
-        setHdrSelectValue(hdrAdaptSelectEl, hdrPipeline.adaptSpeed, HDR_ADAPT_LABELS[String(hdrPipeline.adaptSpeed)]);
-    });
-    setHdrSelectValue(hdrToggleSelectEl, hdrPipeline.enabled ? "on" : "off");
-    setHdrSelectValue(hdrToneMapSelectEl, hdrPipeline.toneMapper);
-    setHdrSelectValue(hdrAutoExposureSelectEl, hdrPipeline.autoExposure ? "on" : "off");
-    setHdrSelectValue(hdrExposureSelectEl, hdrPipeline.exposure);
-    setHdrSelectValue(hdrKeySelectEl, hdrPipeline.keyValue);
-    setHdrSelectValue(hdrAdaptSelectEl, hdrPipeline.adaptSpeed, HDR_ADAPT_LABELS[String(hdrPipeline.adaptSpeed)]);
 }
 
 function wireUIEvents() {
@@ -417,16 +301,18 @@ function wireUIEvents() {
     renderer.domElement.addEventListener("wheel", event => {
         if (!controls.enabled) return;
         event.preventDefault();
-        const speedScale = cameraFocusSpeedScale();
+        const speedScale = cameraFocusSpeedScale() * (globalThis.cameraAtmosphereSpeedFactor ? globalThis.cameraAtmosphereSpeedFactor() : 1);
         if (landingState?.body?.visible) {
+            // Altitude is exponential like every other zoom in the app, so the first
+            // notch off the surface actually moves.
             const body = landingState.body;
             const radius = bodyWorldRadius(body);
             const minimumClearance = cameraEyeHeightUnits(body);
-            const maximumClearance = Math.max(minimumClearance, radius * 8);
-            const clearance = landingState.surfaceClearance ?? minimumClearance;
-            const clearanceKm = clearance / km2u(1);
-            const stepKm = Math.max(.001, Math.min(1e3, clearanceKm * .12));
-            landingState.surfaceClearance = Math.max(minimumClearance, Math.min(maximumClearance, clearance + km2u(stepKm * event.deltaY / 100)));
+            const maximumClearance = Math.max(minimumClearance, radius * .45);
+            const clearance = Math.max(minimumClearance, landingState.clearanceTarget ?? landingState.surfaceClearance ?? minimumClearance);
+            const factor = Math.exp(event.deltaY * ZOOM_SENSITIVITY * 3 * cameraFocusSpeedScale());
+            landingState.clearanceTarget = Math.max(minimumClearance, Math.min(maximumClearance, clearance * factor));
+            landingState.clearanceAt = performance.now();
             zoomDistTarget = null;
             return;
         }
@@ -495,16 +381,11 @@ function wireUIEvents() {
         if (bodySelectEl.classList.contains("open")) positionBodyMenu();
         if (visualSelectEl.classList.contains("open")) positionVisualMenu();
         if (fpsSelectEl.classList.contains("open")) positionFpsMenu();
-        if (skyTextureSelectEl && skyTextureSelectEl.classList.contains("open")) positionTexMenu(skyTextureSelectEl);
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         performanceDefaults.applySize();
         renderer.setSize(window.innerWidth, window.innerHeight);
         labelRenderer.setSize(window.innerWidth, window.innerHeight);
-        {
-            const _ratio = renderer.getPixelRatio();
-            hdrPipeline.resize(Math.floor(window.innerWidth * _ratio), Math.floor(window.innerHeight * _ratio));
-        }
     });
     window.addEventListener("resize", () => {
         const rect = dockEl.getBoundingClientRect();
@@ -530,46 +411,39 @@ function wireUIEvents() {
             e.preventDefault();
             pauseBtn.click();
             break;
-
           case "t":
             if (!e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
                 setAsteroidsEnabled(!allAsteroidTypesOn());
             }
             break;
-
           case "c":
             if (!e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
                 stopCameraMotion();
             }
             break;
-
           case "h":
             if (dockEl.classList.contains("collapsed")) showDock(); else hideDock();
             break;
-
           case "l":
             if (!e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
                 landOnFocusedPlanet();
             }
             break;
-
           case "m":
             if (!e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
                 toggleMute();
             }
             break;
-
           case "n":
             if (!e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
                 syncToNow();
             }
             break;
-
           case "o":
             if (!e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
@@ -577,11 +451,9 @@ function wireUIEvents() {
                 setPathStyle(cur === "trails" ? "orbits" : cur === "orbits" ? "off" : "trails");
             }
             break;
-
           case "r":
             resetViewBtn.click();
             break;
-
           case "+":
           case "=":
             e.preventDefault();
@@ -591,7 +463,6 @@ function wireUIEvents() {
                 cancelable: true
             }));
             break;
-
           case "-":
           case "_":
             e.preventDefault();
@@ -601,22 +472,21 @@ function wireUIEvents() {
                 cancelable: true
             }));
             break;
-
           case ",":
           case "<":
             e.preventDefault();
             nudgeSpeedSlider(e.shiftKey ? -.05 : -.5);
             break;
-
           case ".":
           case ">":
             e.preventDefault();
             nudgeSpeedSlider(e.shiftKey ? .05 : .5);
             break;
-
           case "escape":
             e.preventDefault();
-            if (!leavePlanetLanding() && !unfocusKeepCamera()) resetCamera();
+            // Escape backs out one step and never flies the camera anywhere:
+            // landing -> leave the surface, focused -> let go but stay put.
+            if (!leavePlanetLanding()) unfocusKeepCamera();
             break;
         }
     });

@@ -42,17 +42,24 @@ const LOADING_HARD_MS = 2e4;
 
 const RES_PICKER_DELAY_MS = 500;
 
-const ZOOM_SENSITIVITY = .001;
+const ZOOM_SENSITIVITY = .0007;
 
 const ZOOM_EASE_RATE = 7.5;
 
-const CAMERA_MOVE_MAX_SPEED = .2;
+const CAMERA_MOVE_MAX_SPEED = .11;
 
 const CAMERA_WALK_SPEED_MPS = 1.4;
 
-const CAMERA_NEAR_BODY_SPEED_MPS = 1.4;
+// Near a body the step is tied to that body: a key press covers a fixed
+// fraction of its radius per second, growing with altitude until the tuned
+// orbital speed takes over again.
+const CAMERA_SURFACE_SPEED_RADII = .06;
 
-const CAMERA_ATMOSPHERE_SPEED_MPS = .4;
+const CAMERA_ALTITUDE_SPEED_RATE = .08;
+
+const CAMERA_NEAR_BODY_SPEED_MPS = 60;
+
+const CAMERA_ATMOSPHERE_SPEED_MPS = 25;
 
 const CAMERA_ARC_BOW = .16;
 
@@ -68,6 +75,12 @@ const GRAPHICS_PIXEL_RATIO = {
     low: 1,
     medium: 1.25,
     high: 1.5
+};
+
+const GRAPHICS_FLARE_SCALE = {
+    low: .35,
+    medium: .5,
+    high: .5
 };
 
 const GRAPHICS_ASTEROID_COUNT = {
@@ -129,34 +142,6 @@ function bestSupportedTextureResolution(value, fallback = "2k") {
     return fallback;
 }
 
-const SKY_TEXTURE_RESOLUTION_VALUES = [ "2k", "4k", "8k", "16k" ];
-
-const SKY_TEXTURE_RESOLUTION_SIZE = {
-    "2k": 2048,
-    "4k": 4096,
-    "8k": 8192,
-    "16k": 16384
-};
-
-function normalizeSkyTextureResolution(value, fallback = "4k") {
-    return SKY_TEXTURE_RESOLUTION_VALUES.includes(value) ? value : fallback;
-}
-
-function skyTextureResolutionSupported(value) {
-    const maxSize = renderer?.capabilities?.maxTextureSize || Infinity;
-    return maxSize >= (SKY_TEXTURE_RESOLUTION_SIZE[value] || 0);
-}
-
-function bestSupportedSkyTextureResolution(value, fallback = "4k") {
-    const normalized = normalizeSkyTextureResolution(value, fallback);
-    if (skyTextureResolutionSupported(normalized)) return normalized;
-    for (let i = SKY_TEXTURE_RESOLUTION_VALUES.length - 1; i >= 0; i--) {
-        const candidate = SKY_TEXTURE_RESOLUTION_VALUES[i];
-        if ((SKY_TEXTURE_RESOLUTION_SIZE[candidate] || 0) <= (SKY_TEXTURE_RESOLUTION_SIZE[normalized] || 0) && skyTextureResolutionSupported(candidate)) return candidate;
-    }
-    return fallback;
-}
-
 const SUN_CORONA_ENABLED = true;
 
 const SUN_CORONA_SHELL_SCALE = 2.2;
@@ -169,16 +154,6 @@ const SUN_CORONA_STREAMERS = .1;
 
 const SUN_CORONA_STREAMER_SCALE = 4.2;
 
-const SUN_DIM_MAX = .9;
-
-const SUN_DIM_FAR_R = 330;
-
-const SUN_DIM_NEAR_R = 3;
-
-const SUN_DIM_CLEAR_R = 1.3;
-
-const SUN_DIM_OUTER_R = 2.35;
-
 const ENABLE_NEW_MOON_SHADOWS = true;
 
 const MODULE_BUILD = "r27";
@@ -190,8 +165,6 @@ const CATALOG_UPDATE_MS = 1e3 / CATALOG_UPDATE_HZ;
 let asteroidsEnabled = false;
 
 let textureResolution = "2k";
-
-let skyResolution = "4k";
 
 let textureQuality = "medium";
 
@@ -241,23 +214,25 @@ let sunCoronaEnabled = true;
 
 let sunCoronaFade = 1;
 
-let milkyWayTexture = null;
-
 let themeGradientTexture = null;
 
 let skyMaps = null;
 
 let constellationLayer = null;
 
+let starField = null;
+
 let earthNightTexture = null;
+// The weather system behind the cloud deck: the storm population and the
+// physical state texture (cloud top, ice fraction, lightning, storm intensity).
+// Null until the deck is built, or if the storm field failed to build.
+let worldWeatherField = null;
 
 let sunCoronaMesh = null;
 
 let sunHaloMesh = null;
 
 let sunLensArtifacts = null;
-
-let sunDimAmt = 0;
 
 let saturnMat = null;
 
@@ -335,9 +310,7 @@ let mapManifestNotice = false;
 
 const loadedTextures = new Map;
 
-const textureRequests = new TextureRequests(THREE, 2);
-
-const skyTextureRequests = new TextureRequests(THREE, 2);
+const textureRequests = new TextureRequests(THREE, 4);
 
 const objectRegistry = {};
 
@@ -368,6 +341,10 @@ const labelObjects = [];
 const orbitLines = [];
 
 const cloudMeshes = {};
+// The volumetric cloud shells, one per body that has an atmosphere volume.
+// Kept apart from `cloudMeshes` because the flat deck and the volume are
+// different levels of detail of the same cloud, never active together.
+const cloudVolumeMeshes = {};
 
 const proceduralTextures = {};
 
@@ -380,7 +357,7 @@ const ringShadowBindings = [];
 const pathSettings = {
     style: "orbits",
     enabled: true,
-    length: .65,
+    length: 1,
     width: 1,
     glow: 1
 };
@@ -436,6 +413,25 @@ const eclipseUniforms = {
         value: 0
     },
     uEclipseSunRadius: {
+        value: 0
+    },
+
+    uCloudTime: {
+        value: 0
+    },
+    uCloudShadowMap: {
+        value: null
+    },
+    uCloudShadowSunLocal: {
+        value: new THREE.Vector3(0, 1, 0)
+    },
+    uCloudShadowUvOffset: {
+        value: new THREE.Vector2
+    },
+    uCloudShadowUseAlpha: {
+        value: 0
+    },
+    uCloudShadowStrength: {
         value: 0
     }
 };
@@ -658,11 +654,18 @@ const bodyFacts = {
 
 const wantBodyPin2K = () => false;
 
-const skyTexRes = () => skyResolution;
-
-const weatherEnabled = () => !lightningReducedMotion.matches;
-
 const lightningReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+let lightningEnabled = (() => {
+    try {
+        const saved = localStorage.getItem("solarLightning");
+        if (saved === "0") return false;
+        if (saved === "1") return true;
+    } catch (e) {}
+    return !lightningReducedMotion.matches;
+})();
+
+const weatherEnabled = () => lightningEnabled;
 
 const _beltSunPosition = new THREE.Vector3;
 
@@ -680,11 +683,6 @@ try {
     } else {
         asteroidsEnabled = false;
     }
-} catch (e) {}
-
-try {
-    const savedSky = localStorage.getItem("solarSkyTexRes");
-    skyResolution = normalizeSkyTextureResolution(savedSky, skyResolution);
 } catch (e) {}
 
 try {
@@ -767,17 +765,61 @@ const DEFAULT_CAM_POS = new THREE.Vector3(900, 600, 1300);
 
 camera.position.copy(DEFAULT_CAM_POS);
 
-const renderer = new THREE.WebGLRenderer({
-    antialias: true,
-    alpha: false,
-    powerPreference: "high-performance",
-    stencil: true,
-    logarithmicDepthBuffer: true
-});
+// Tessellation scale for bodies built later, tied to the quality preset.
+globalThis.__solisterGraphicsTier = Object.prototype.hasOwnProperty.call(TEXTURE_QUALITY_POLICY, textureQuality)
+    ? textureQuality
+    : "medium";
+
+// The renderer itself is created by bootstrap through renderer-runtime.js,
+// the P2 backend seam, before this classic script runs. This file owns what
+// the app does with that one renderer (canvas policy, display chain, probes),
+// not a second creation path.
+const rendererHandle = globalThis.__solisterRendererHandle || null;
+const renderer = rendererHandle?.renderer || null;
+globalThis.__solisterRendererInfo = rendererHandle?.info || globalThis.__solisterRendererInfo || null;
+
+if (!renderer) {
+    const blocked = rendererHandle?.blocked === true || globalThis.__solisterRendererBlocked === true;
+    const rendererError = rendererHandle?.error || globalThis.__solisterRendererError || null;
+    globalThis.__solisterStartupFailure = !rendererHandle
+        ? "Renderer runtime did not create a renderer before the app state loaded."
+        : blocked
+        ? "The browser has blocked WebGL for this page after a context loss ("
+          + (rendererError?.message || "context creation refused")
+          + "). Reload the page to clear the block. If it keeps happening, close other 3D tabs and make sure hardware acceleration is on."
+        : "WebGL context creation failed: "
+          + (rendererError && rendererError.message ? rendererError.message : "the browser refused the context");
+    throw new Error(globalThis.__solisterStartupFailure);
+}
+
+// Chrome blocks new contexts on a page after it decides the page caused a loss.
+// preventDefault() on the loss event is what allows the context to come back;
+// without it the canvas stays dead for the rest of the session.
+renderer.domElement.addEventListener("webglcontextlost", (event) => {
+    event.preventDefault();
+    globalThis.__solisterContextLost = true;
+    globalThis.__solisterSetContextNotice?.(true);
+}, false);
+
+renderer.domElement.addEventListener("webglcontextrestored", () => {
+    globalThis.__solisterContextLost = false;
+    globalThis.__solisterSetContextNotice?.(false);
+}, false);
 
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, GRAPHICS_PIXEL_RATIO[textureQuality] ?? 1.5));
+
+// The frame's display transform, created once and owned here: the scene is
+// drawn in linear radiance into its own buffer and the tone curve maps that to
+// the canvas. Everything else stays in radiance.
+const displayChain = createDisplayChain(THREE, renderer);
+
+globalThis.solisterDisplay = displayChain;
+// The renderer itself, for probes: the display chain keeps it private, and a
+// probe that cannot read the frame back cannot tell a black shader from a black
+// sky.
+globalThis.solisterRenderer = renderer;
 
 renderer.shadowMap.enabled = false;
 
@@ -785,30 +827,21 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 container.appendChild(renderer.domElement);
 
-const hdrPipeline = new HdrPipeline({
-    THREE: THREE,
-    renderer: renderer,
-    enabled: true,
-    toneMapper: HDR_TONE_MAPPER.aces,
-    exposure: 1.6,
-    autoExposure: true,
-    keyValue: .18,
-    adaptSpeed: 1.6
-});
-
-hdrPipeline.resize(Math.floor(window.innerWidth * renderer.getPixelRatio()), Math.floor(window.innerHeight * renderer.getPixelRatio()));
-
 textureRequests.attachRenderer(renderer);
 
-skyTextureRequests.attachRenderer(renderer);
+textureResolution = bestSupportedTextureResolution(textureResolution);
 
 textureResolution = bestSupportedTextureResolution(textureResolution);
 
-skyResolution = bestSupportedSkyTextureResolution(skyResolution, skyResolution);
-
-textureResolution = bestSupportedTextureResolution(textureResolution);
-
-skyResolution = bestSupportedSkyTextureResolution(skyResolution, skyResolution);
+try {
+    if (!wantBodyPin2K()) {
+        const policyBase = TEXTURE_QUALITY_POLICY[textureQuality]?.base;
+        if (policyBase && (TEXTURE_LOD_RANK[policyBase] ?? 0) > (TEXTURE_LOD_RANK[textureResolution] ?? 0)) {
+            textureResolution = bestSupportedTextureResolution(policyBase);
+            localStorage.setItem("solarTexRes", textureResolution);
+        }
+    }
+} catch (e) {}
 
 const clock = new THREE.Clock;
 
@@ -844,7 +877,7 @@ controls.enableDamping = true;
 
 controls.dampingFactor = .05;
 
-controls.rotateSpeed = .72;
+controls.rotateSpeed = .5;
 
 controls.panSpeed = .75;
 
@@ -856,9 +889,9 @@ controls.enableZoom = false;
 
 controls.target.set(0, 0, 0);
 
-controls.maxPolarAngle = Math.PI - .01;
+controls.maxPolarAngle = Math.PI;
 
-controls.minPolarAngle = .01;
+controls.minPolarAngle = 0;
 
 controls.autoRotate = false;
 
@@ -869,7 +902,8 @@ controls.enablePan = false;
 controls.mouseButtons = {
     LEFT: THREE.MOUSE.ROTATE,
     MIDDLE: THREE.MOUSE.DOLLY,
-    RIGHT: THREE.MOUSE.ROTATE
+
+    RIGHT: null
 };
 
 controls.update();
@@ -928,20 +962,6 @@ focusDot.setAttribute("opacity", "0");
 
 focusLineLayer.appendChild(focusDot);
 
-const sunDimEl = document.createElement("div");
-
-sunDimEl.dataset.sunfx = "dim";
-
-sunDimEl.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:6;opacity:0;";
-
-sunDimEl._lastGx = -1;
-
-sunDimEl._lastGy = -1;
-
-sunDimEl._lastGr = -1;
-
-document.body.appendChild(sunDimEl);
-
 const solarAccuracyStatus = document.createElement("p");
 
 solarAccuracyStatus.id = "solar-accuracy-status";
@@ -972,8 +992,6 @@ const proceduralDrawFns = {
     moon: drawMoonTexture,
     "saturn-ring": drawSaturnRingTexture
 };
-
-let _mwLoadKey = null;
 
 const moonOrbitPoint = new THREE.Vector3;
 
@@ -1038,6 +1056,12 @@ constellationLayer = new ConstellationLayer({
     radius: SKY_RADIUS
 });
 
+starField = new StarField({
+    THREE: THREE,
+    scene: scene,
+    radius: SKY_RADIUS
+});
+
 if (typeof constellationLayer.setOccluderProvider === "function") {
     constellationLayer.setOccluderProvider(() => [ ...Object.values(objectRegistry), ...Object.values(cloudMeshes) ].filter(Boolean));
 }
@@ -1064,16 +1088,8 @@ skyMaps = new SkyMaps({
     THREE: THREE,
     scene: scene,
     renderer: renderer,
-    basePath: "./assets/textures",
-    resolution: skyTexRes(),
     radius: SKY_RADIUS,
-    milkywayOpacity: 1,
-    milkywayExposure: 12.5,
-    milkywayStretch: 40,
-    milkywayGamma: 1.15,
-    makeLoader: layer => skyTextureRequests.batch("sky-" + (layer || "maps")),
-    onLoadStart: () => trackLoadStart(),
-    onLoadEnd: () => trackLoadEnd()
+    milkywayOpacity: 1
 });
 
 skyMaps.onVisibilityApplied = applyStarVisibility;
@@ -1081,8 +1097,6 @@ skyMaps.onVisibilityApplied = applyStarVisibility;
 applySkyToggles(true);
 
 applyStarVisibility();
-
-if (typeof loadMilkywayBackground === "function") loadMilkywayBackground();
 
 const moduleNeedsInstall = [];
 
@@ -1211,8 +1225,6 @@ const fpsSelectEl = document.getElementById("fps-select");
 
 const bodySelectEl = document.getElementById("body-select");
 
-const skyTextureSelectEl = document.getElementById("sky-texture-select");
-
 const visualTriggerEl = visualSelectEl.querySelector(".tex-select-trigger");
 
 const visualValueEl = visualSelectEl.querySelector(".tex-select-value");
@@ -1230,20 +1242,6 @@ const bodyTriggerEl = bodySelectEl.querySelector(".tex-select-trigger");
 const bodyValueEl = bodySelectEl.querySelector(".tex-select-value");
 
 const bodyOptionEls = bodySelectEl.querySelectorAll(".tex-select-menu li[data-key]");
-
-const skyTextureOptionEls = skyTextureSelectEl ? [ ...skyTextureSelectEl.querySelectorAll(".tex-select-menu li[data-value]") ] : [];
-
-const hdrToggleSelectEl = document.getElementById("hdr-toggle-select");
-
-const hdrToneMapSelectEl = document.getElementById("hdr-tonemap-select");
-
-const hdrAutoExposureSelectEl = document.getElementById("hdr-autoexposure-select");
-
-const hdrExposureSelectEl = document.getElementById("hdr-exposure-select");
-
-const hdrKeySelectEl = document.getElementById("hdr-key-select");
-
-const hdrAdaptSelectEl = document.getElementById("hdr-adapt-select");
 
 const moonGroups = {
     asteroidbelt: [ "trojanl4", "trojanl5", "hildas", "nea" ],
@@ -1301,6 +1299,16 @@ const _ctBowAxis = new THREE.Vector3;
 const _ctQuatSpin = new THREE.Quaternion;
 
 const _ctQuatStep = new THREE.Quaternion;
+
+const _ctBodyQuat = new THREE.Quaternion;
+
+const _ctUpNow = new THREE.Vector3;
+
+const _ctUpQuat = new THREE.Quaternion;
+
+const _ctFromCam = new THREE.Vector3;
+
+const _ctFromTarget = new THREE.Vector3;
 
 const _cullFrustum = new THREE.Frustum;
 
@@ -1553,6 +1561,10 @@ planetWeather = new PlanetWeather({
     getAtmosphereProfile: key => PLANET_ATMOSPHERE_PROFILES[key],
     getRadiusKm: key => BodyShapes.maxRadiusKm(key),
     getEarthCloudTexture: () => cloudMeshes.earth?.material?.map || null,
+
+    getEarthCloudOpacity: () => earthCloudsOpacity,
+    getEarthCloudGlowMaterial: () => objectRegistry.earth?.userData?.cloudGlowMesh?.material || null,
+    getEarthWeatherField: () => cloudMeshes.earth?.material?.userData?.weatherField || null,
     getSurfaceHeightKm: (key, normal) => {
         const length = Math.hypot(normal.x, normal.y, normal.z) || 1;
         const latitude = Math.asin(Math.max(-1, Math.min(1, normal.y / length)));
@@ -1560,6 +1572,11 @@ planetWeather = new PlanetWeather({
         return elevationCatalog.sampleElevationM(key, latitude, longitude) / 1000;
     }
 });
+
+// Reached by probes the same way the boot progress is: the module-level `let`
+// is not a property of the global object, and a probe that cannot see the
+// weather system cannot check the lightning it drives.
+globalThis.__solisterPlanetWeather = planetWeather;
 
 performanceDefaults.attach({
     renderer: renderer,

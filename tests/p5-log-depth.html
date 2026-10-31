@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5d1 — log-depth chunk fix proof</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 296px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="384" height="288"></canvas>
+<div id="status">P5d1 log depth starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import * as THREE from "three";
+import { REVISION } from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const W = 384, H = 288;
+const canvas = document.getElementById("c");
+// Depth-stress cases: a shell at 1.002 radii around a unit
+// sphere, camera at 3 units. The sphere uses a built-in
+// material (three's own logarithmic depth); the shell uses a
+// ShaderMaterial assembled from the production LDB chunks
+// exactly as the production consumers assemble them. If the
+// chunks are live, both write the same depth curve and the
+// shell (in front everywhere on the visible disc) wins every
+// disc pixel. If they are dead, the shell writes linear
+// depth against the sphere's log depth and loses most of
+// the disc.
+const CASES = [
+  { near: 1e-6, far: 1e6 },
+  { near: 0.01, far: 1e4 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5logdepth = { done: false, error: null };
+window.THREE = THREE;
+
+try {
+  // Registers the LDB_* globals (production's own mechanism).
+  await import("../src/render/log-depth-glsl.js");
+
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: false,
+    search: location.search,
+    requestedBackend: "webgl",
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = THREE.NoToneMapping;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(40, W / H, cfg.near, cfg.far);
+  camera.position.set(0, 0, 3);
+  camera.lookAt(0, 0, 0);
+
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 96, 64),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(0.25, 0.5, 1.0) }));
+
+  const shellMaterial = new THREE.ShaderMaterial({
+    name: "P5d1 LDB consumer (production chunks)",
+    vertexShader: `
+      ${window.LDB_VERTEX_PARS}
+      void main() {
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        ${window.LDB_VERTEX_TAIL}
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      ${window.LDB_FRAGMENT_PARS}
+      void main() {
+        ${window.LDB_FRAGMENT_HEAD}
+        gl_FragColor = vec4(1.0, 0.45, 0.2, 1.0);
+      }
+    `
+  });
+  const shell = new THREE.Mesh(new THREE.SphereGeometry(1.002, 96, 64), shellMaterial);
+  scene.add(sphere);
+  scene.add(shell);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5logdepth = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    caseIndex,
+    width: W,
+    height: H,
+    caseShape: { near: cfg.near, far: cfg.far, shellScale: 1.002, cam: [0, 0, 3] },
+    chunks: {
+      pars: window.LDB_VERTEX_PARS,
+      tail: window.LDB_VERTEX_TAIL,
+      fragPars: window.LDB_FRAGMENT_PARS,
+      head: window.LDB_FRAGMENT_HEAD
+    },
+    logDepthCapability: renderer.capabilities.logarithmicDepthBuffer === true,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5d1 log depth case ${caseIndex}: logDepth=${renderer.capabilities.logarithmicDepthBuffer}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5logdepth = { done: true, error: String(e?.stack || e), revision: REVISION, caseIndex };
+  status.textContent = "P5d1 log depth error: " + window.__p5logdepth.error;
+}
+</script>
+</body>
+</html>

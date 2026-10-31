@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e3 — star field GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e3 star field starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createStarFieldPoints, createStarFieldQuadGeometry } from "../src/sky/star-field.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  AdditiveBlending as NodeAdditiveBlending,
+  REVISION
+} from "three/webgpu";
+import { vec4 } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// A deterministic synthetic catalogue feeds the extracted
+// production points material and the TSL quad factory with
+// identical attribute arrays. The colour/size derivation uses
+// production's own temperatureRgb (extracted below) and the
+// level/size formulas from StarField._build. Cases:
+//   0 production point sizes (magnitudes -1..6.8 -> ~1-8 px)
+//   1 sizes x12 (falloff arithmetic in interiors)
+//   2 sizes x12 behind an occluding sphere (depth)
+//   3 production sizes with pixel ratio 2
+const RADIUS = 50;
+const BASE = { sizeFactor: 1, pixelRatio: 1, occluder: false };
+const CASES = [
+  { ...BASE },
+  { ...BASE, sizeFactor: 12 },
+  { ...BASE, sizeFactor: 12, occluder: true },
+  { ...BASE, pixelRatio: 2 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5stars = { done: false, error: null };
+
+async function loadProduction() {
+  const text = await fetch("../src/sky/star-field.js").then(r => {
+    if (!r.ok) throw new Error("star-field.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalOf = (marker) => {
+    const at = text.indexOf(marker);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return text.slice(tick, end + 1);
+  };
+  const vertexShader = Function("return " + literalOf("const VERTEX_SHADER = "))();
+  const fragmentShader = Function("return " + literalOf("const FRAGMENT_SHADER = "))();
+  const fnAt = text.indexOf("function temperatureRgb(");
+  const classAt = text.indexOf("export class StarField");
+  if (fnAt < 0 || classAt < fnAt) throw new Error("temperatureRgb bounds not found");
+  const temperatureRgb = Function(text.slice(fnAt, classAt) + "\nreturn temperatureRgb;")();
+  const num = (name) => {
+    const m = text.match(new RegExp("const " + name + " = ([0-9.]+);"));
+    if (!m) throw new Error("constant not found: " + name);
+    return Number(m[1]);
+  };
+  if (!vertexShader.includes("gl_PointSize") || !fragmentShader.includes("gl_PointCoord") ||
+      typeof temperatureRgb !== "function") {
+    throw new Error("extracted star-field pieces do not look like production");
+  }
+  return {
+    vertexShader, fragmentShader, temperatureRgb,
+    SIZE_MIN: num("SIZE_MIN"), SIZE_SLOPE: num("SIZE_SLOPE"), SIZE_MAX: num("SIZE_MAX")
+  };
+}
+
+// Deterministic catalogue and the production array derivation
+// (StarField._build's colour/size lines, fed synthetic dirs
+// directly in scene space -- the RA/Dec conversion is plain
+// JavaScript outside this port's scope).
+function buildArrays(prod) {
+  let seed = 0x5eed1234;
+  const rnd = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const n = 260;
+  const positions = new Float32Array(n * 3);
+  const colors = new Float32Array(n * 3);
+  const sizes = new Float32Array(n);
+  const temps = [3200, 4500, 5800, 7500, 10000, 15000];
+  for (let i = 0; i < n; i++) {
+    // Uniform direction on the sphere (rejection in the cube).
+    let x, y, z, l2;
+    do { x = rnd() * 2 - 1; y = rnd() * 2 - 1; z = rnd() * 2 - 1; l2 = x * x + y * y + z * z; }
+    while (l2 > 1 || l2 < 1e-6);
+    const l = Math.sqrt(l2);
+    positions[i * 3] = x / l; positions[i * 3 + 1] = y / l; positions[i * 3 + 2] = z / l;
+    const mag = -1 + rnd() * 7.8;
+    const rgb = prod.temperatureRgb(temps[i % temps.length]);
+    const level = Math.min(1, .35 * Math.pow(10, -.25 * (mag - 6.5)));
+    colors[i * 3] = rgb[0] * level;
+    colors[i * 3 + 1] = rgb[1] * level;
+    colors[i * 3 + 2] = rgb[2] * level;
+    sizes[i] = Math.min(prod.SIZE_MAX, prod.SIZE_MIN + (6.5 - mag) * prod.SIZE_SLOPE) * cfg.sizeFactor;
+  }
+  return { positions, colors, sizes };
+}
+
+function buildGlslScene(prod, arrays) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.02, 2000);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  scene.add(camera);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(arrays.positions, 3));
+  geometry.setAttribute("aColor", new THREE.BufferAttribute(arrays.colors, 3));
+  geometry.setAttribute("aSize", new THREE.BufferAttribute(arrays.sizes, 1));
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1.01);
+  const material = new THREE.ShaderMaterial({
+    uniforms: { uPixelRatio: { value: cfg.pixelRatio } },
+    vertexShader: prod.vertexShader,
+    fragmentShader: prod.fragmentShader,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    depthTest: true,
+    toneMapped: false,
+    fog: false
+  });
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;
+  points.renderOrder = -600;
+  points.scale.setScalar(RADIUS);
+  scene.add(points);
+  if (cfg.occluder) {
+    const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.2235, 0.2627, 0.3529) });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(6, 48, 32), mat);
+    mesh.position.set(3, 1, -25);
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+function buildTslScene(arrays) {
+  const scene = new NodeScene();
+  const camera = new NodePerspectiveCamera(60, 1, 0.02, 2000);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  scene.add(camera);
+  const stars = createStarFieldPoints({
+    pixelRatio: cfg.pixelRatio,
+    viewport: [size, size]
+  });
+  const material = new MeshBasicNodeMaterial({ name: "P5e3 star field TSL" });
+  material.transparent = true;
+  material.blending = NodeAdditiveBlending;
+  material.depthWrite = false;
+  material.depthTest = true;
+  material.toneMapped = false;
+  material.vertexNode = stars.vertexNode;
+  material.colorNode = stars.colorNode;
+  if (stars.depthNode) material.depthNode = stars.depthNode;
+  const geometry = createStarFieldQuadGeometry(NodeNS, arrays);
+  const mesh = new NodeMesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -600;
+  mesh.scale.setScalar(RADIUS);
+  scene.add(mesh);
+  if (cfg.occluder) {
+    const mat = new MeshBasicNodeMaterial({ name: "P5e3 occluder TSL" });
+    mat.colorNode = vec4(0.2235, 0.2627, 0.3529, 1.0);
+    const occ = new NodeMesh(new NodeSphereGeometry(6, 48, 32), mat);
+    occ.position.set(3, 1, -25);
+    scene.add(occ);
+  }
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProduction();
+  const arrays = buildArrays(prod);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    // The seam's legacy path always uses production's primary
+    // configuration (MSAA on, log depth on); the node path must
+    // ask for the same sampling (P5e2 measurement).
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod, arrays) : buildTslScene(arrays);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5stars = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    sizeFactor: cfg.sizeFactor,
+    pixelRatio: cfg.pixelRatio,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e3 star field ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5stars = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e3 star field error: " + window.__p5stars.error;
+}
+</script>
+</body>
+</html>

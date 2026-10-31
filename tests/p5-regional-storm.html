@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c3 — regional storm glow GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c3 regional storm starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createRegionalStormGlow } from "../src/ui/planet-detail.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { positionGeometry, uv, vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+// Centres are unit local directions with the angular scale in w, as the
+// production slots carry them; scales here are enlarged from production's
+// 0.004-0.010 flashes so each glow covers many pixels. Cases cover a night
+// side with an inactive and a far-side slot, a terminator with slots above
+// and below the 0.001 power guard (three supplied, padding exercised), a
+// day side (night gate closed), and all powers at/below the guard.
+const CASES = [
+  {
+    sun: [-0.19, 0.09, -0.98],
+    centers: [[0, 0, 1, 0.28], [0.45, -0.2, 0.87, 0.18], [0, 0, 1, 0.2], [-0.85, 0.35, -0.4, 0.3]],
+    powers: [0.9, 0.55, 0.0, 1.2],
+    tint: [0.83, 0.87, 1.0], diffusion: 0.34
+  },
+  {
+    sun: [0.8, 0.24, 0.42],
+    centers: [[-0.25, 0.3, 0.92, 0.35], [0.1, 0.05, 0.99, 0.5], [0.3, -0.35, 0.89, 0.05]],
+    powers: [0.7, 0.0015, 1.3],
+    tint: [0.66, 0.8, 1.0], diffusion: 0.16
+  },
+  {
+    sun: [0.1, 0.0, 0.99],
+    centers: [[0, 0, 1, 0.25], [0.4, 0.3, 0.86, 0.15]],
+    powers: [1.4, 1.0],
+    tint: [0.83, 0.87, 1.0], diffusion: 0.34
+  },
+  {
+    sun: [-0.19, 0.09, -0.98],
+    centers: [[0, 0, 1, 0.1], [0.3, 0.2, 0.93, 0.2], [-0.3, -0.25, 0.92, 0.2], [0.1, -0.4, 0.91, 0.2]],
+    powers: [0.0, 0.0009, 0.0, 0.0],
+    tint: [0.66, 0.8, 1.0], diffusion: 0.16
+  }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const rawCfg = CASES[caseIndex];
+const unit3 = a => {
+  const len = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0] / len, a[1] / len, a[2] / len];
+};
+const cfg = {
+  ...rawCfg,
+  sun: unit3(rawCfg.sun),
+  centers: rawCfg.centers.map(c => [...unit3(c), c[3]])
+};
+
+window.__p5storm = { done: false, error: null };
+
+async function loadStormEffect() {
+  // Extract the exact effect template literal passed to hook() in bindGas,
+  // so the GLSL reference cannot drift from production.
+  const text = await fetch("../src/ui/planet-detail.js").then(r => {
+    if (!r.ok) throw new Error("planet-detail.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const bindStart = text.indexOf("regional-storm-");
+  if (bindStart < 0) throw new Error("regional-storm hook not found");
+  const sig = text.indexOf("vec3 n=normalize(vDetailLocal);float illumination=0.0;", bindStart);
+  if (sig < 0) throw new Error("regional-storm effect not found");
+  const tickChar = String.fromCharCode(96);
+  const tick = text.lastIndexOf(tickChar, sig);
+  const end = text.indexOf(tickChar, sig);
+  if (tick < 0 || end < 0) throw new Error("regional-storm effect literal bounds not found");
+  const effect = Function("return " + text.slice(tick, end + 1))();
+  if (!effect.includes("totalEmissiveRadiance+=")) throw new Error("extracted effect is not the storm glow");
+  return effect;
+}
+
+function makeCapGeometry(GeometryClass) {
+  const geometry = new GeometryClass(2, 2, 160, 160);
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i) * 1.15;
+    const y = pos.getY(i) * 1.15;
+    const len = Math.hypot(x, y, 0.75);
+    pos.setXYZ(i, x / len, y / len, 0.75 / len);
+  }
+  pos.needsUpdate = true;
+  return geometry;
+}
+
+function paddedGlslSlots() {
+  const centers = cfg.centers.map(c => new THREE.Vector4(c[0], c[1], c[2], c[3]));
+  while (centers.length < 4) centers.push(new THREE.Vector4(0, 1, 0, 0.007));
+  const powers = [...cfg.powers];
+  while (powers.length < 4) powers.push(0);
+  return { centers, powers };
+}
+
+function makeGlslMaterial(effect) {
+  const slots = paddedGlslSlots();
+  return new THREE.ShaderMaterial({
+    name: "P5c3 regional-storm GLSL reference",
+    uniforms: {
+      gCenters: { value: slots.centers },
+      gSun: { value: new THREE.Vector3(cfg.sun[0], cfg.sun[1], cfg.sun[2]) },
+      gPowers: { value: slots.powers },
+      gTint: { value: new THREE.Vector3(cfg.tint[0], cfg.tint[1], cfg.tint[2]) },
+      gDiffusion: { value: cfg.diffusion }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vDetailLocal;
+      void main() {
+        vUv = uv;
+        vDetailLocal = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      varying vec3 vDetailLocal;
+      uniform vec4 gCenters[4];
+      uniform vec3 gSun;
+      uniform float gPowers[4];
+      uniform vec3 gTint;
+      uniform float gDiffusion;
+      void main() {
+        vec3 base = vec3(0.25 + 0.45 * vUv.x, 0.20 + 0.50 * vUv.y, 0.55 - 0.30 * vUv.x);
+        vec3 totalEmissiveRadiance = vec3(0.0);
+        {
+        ${effect}
+        }
+        gl_FragColor = vec4(base * 0.80 + totalEmissiveRadiance * 0.10, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P5c3 regional-storm TSL" });
+  const storm = createRegionalStormGlow({
+    centers: cfg.centers,
+    powers: cfg.powers,
+    sun: cfg.sun,
+    tint: cfg.tint,
+    diffusion: cfg.diffusion
+  });
+  const pUv = uv();
+  const base = vec3(
+    float(0.25).add(pUv.x.mul(0.45)),
+    float(0.20).add(pUv.y.mul(0.50)),
+    float(0.55).sub(pUv.x.mul(0.30)));
+  const outgoing = base.mul(0.80)
+    .add(storm.regionalStormGlow(positionGeometry).mul(0.10));
+  material.colorNode = vec4(outgoing, float(1.0));
+  return material;
+}
+
+try {
+  const effect = impl === "glsl" ? await loadStormEffect() : "";
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  // Framed inside the cap: no silhouette in view (legacy MSAA lesson).
+  const viewExtent = 0.55;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeGlslMaterial(effect);
+    mesh = new THREE.Mesh(makeCapGeometry(THREE.PlaneGeometry), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeTslMaterial();
+    mesh = new NodeMesh(makeCapGeometry(NodePlaneGeometry), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5storm = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    suppliedCenters: cfg.centers.length,
+    suppliedPowers: cfg.powers.length,
+    diffusion: cfg.diffusion,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c3 regional storm ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5storm = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c3 regional storm error: " + window.__p5storm.error;
+}
+</script>
+</body>
+</html>

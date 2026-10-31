@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c4 — detail cloud sampler GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c4 detail cloud sampler starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createDetailCloudSampler } from "../src/ui/planet-detail.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { normalize, positionGeometry, uniform, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+// Cases rotate the sampled cap of body-local directions and vary the map
+// transform: a magnified identity baseline, a 6x3 repeat (gradient-driven
+// mip selection), the detailUV fract() seam at rotY -90 (the derivative x
+// wrap is what is being proved), and a deep 24x12 rotated repeat.
+const CASES = [
+  { rotYDeg: 35, tiltXDeg: 12, sx: 1, sy: 1, tx: 0.0, ty: 0.0, rotDeg: 0 },
+  { rotYDeg: -70, tiltXDeg: -18, sx: 6, sy: 3, tx: 0.13, ty: 0.07, rotDeg: 0 },
+  { rotYDeg: -90, tiltXDeg: 8, sx: 2, sy: 1, tx: 0.31, ty: 0.0, rotDeg: 0 },
+  { rotYDeg: 140, tiltXDeg: 25, sx: 24, sy: 12, tx: 0.05, ty: 0.11, rotDeg: 15 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+const TEX_W = 1024, TEX_H = 512;
+
+window.__p5sampler = { done: false, error: null };
+
+async function loadProductionHelpers() {
+  // Extract the exact shaderUV and cloudSampling template literals from
+  // planet-detail.js, so the GLSL reference cannot drift from production.
+  const text = await fetch("../src/ui/planet-detail.js").then(r => {
+    if (!r.ok) throw new Error("planet-detail.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const extract = marker => {
+    const at = text.indexOf(marker);
+    if (at < 0) throw new Error(marker + " not found");
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (tick < 0 || end < 0) throw new Error(marker + " literal bounds not found");
+    return Function("return " + text.slice(tick, end + 1))();
+  };
+  const shaderUV = extract("const shaderUV = ");
+  const cloudSampling = extract("const cloudSampling = ");
+  if (!shaderUV.includes("detailUV")) throw new Error("extracted shaderUV is not the UV helper");
+  if (!cloudSampling.includes("textureGrad")) throw new Error("extracted cloudSampling has no textureGrad path");
+  return { shaderUV, cloudSampling };
+}
+
+function makeCapGeometry(GeometryClass) {
+  const geometry = new GeometryClass(2, 2, 160, 160);
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i) * 1.15;
+    const y = pos.getY(i) * 1.15;
+    const len = Math.hypot(x, y, 0.75);
+    pos.setXYZ(i, x / len, y / len, 0.75 / len);
+  }
+  pos.needsUpdate = true;
+  return geometry;
+}
+
+function makeTestTexture(TexturePack) {
+  // Smooth, u-periodic analytic pattern (integer u frequencies, so the
+  // RepeatWrapping seam is continuous) with JS-box-filtered manual mipmaps:
+  // both backends sample byte-identical texel data at every level.
+  const data = new Uint8Array(TEX_W * TEX_H * 4);
+  for (let y = 0; y < TEX_H; y++) {
+    const v = y / TEX_H;
+    for (let x = 0; x < TEX_W; x++) {
+      const u = x / TEX_W;
+      const i = (y * TEX_W + x) * 4;
+      data[i] = Math.round(255 * (0.5 + 0.5 * Math.sin(6.28318530718 * (3 * u + 2 * v))));
+      data[i + 1] = Math.round(255 * (0.5 + 0.5 * Math.sin(6.28318530718 * (5 * u - 3 * v) + 1.7)));
+      data[i + 2] = Math.round(255 * (0.5 + 0.5 * Math.cos(6.28318530718 * (2 * u + 4 * v) + 0.6)));
+      data[i + 3] = 255;
+    }
+  }
+  const mipmaps = [{ data, width: TEX_W, height: TEX_H }];
+  let w = TEX_W, h = TEX_H, src = data;
+  while (w > 1 || h > 1) {
+    const nw = Math.max(1, w >> 1), nh = Math.max(1, h >> 1);
+    const out = new Uint8Array(nw * nh * 4);
+    for (let y = 0; y < nh; y++) {
+      for (let x = 0; x < nw; x++) {
+        let r = 0, g = 0, b = 0, a = 0, n = 0;
+        for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+          const sx = Math.min(w - 1, x * 2 + dx), sy = Math.min(h - 1, y * 2 + dy);
+          const si = (sy * w + sx) * 4;
+          r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3]; n++;
+        }
+        const oi = (y * nw + x) * 4;
+        out[oi] = Math.round(r / n); out[oi + 1] = Math.round(g / n);
+        out[oi + 2] = Math.round(b / n); out[oi + 3] = Math.round(a / n);
+      }
+    }
+    mipmaps.push({ data: out, width: nw, height: nh });
+    src = out; w = nw; h = nh;
+  }
+  const tex = new TexturePack.DataTexture(data, TEX_W, TEX_H, TexturePack.RGBAFormat);
+  tex.mipmaps = mipmaps;
+  tex.generateMipmaps = false;
+  tex.magFilter = TexturePack.LinearFilter;
+  tex.minFilter = TexturePack.LinearMipmapLinearFilter;
+  tex.wrapS = TexturePack.RepeatWrapping;
+  tex.wrapT = TexturePack.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return { tex, mipLevels: mipmaps.length };
+}
+
+function makeCaseMatrices() {
+  const m4 = new THREE.Matrix4().makeRotationY(cfg.rotYDeg * Math.PI / 180)
+    .multiply(new THREE.Matrix4().makeRotationX(cfg.tiltXDeg * Math.PI / 180));
+  const rot = new THREE.Matrix3().setFromMatrix4(m4);
+  const a = cfg.rotDeg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  const mapTransform = new THREE.Matrix3().set(
+    c * cfg.sx, -s * cfg.sy, cfg.tx,
+    s * cfg.sx, c * cfg.sy, cfg.ty,
+    0, 0, 1);
+  return { rot, mapTransform };
+}
+
+function makeGlslMaterial(helpers, tex, mats) {
+  return new THREE.ShaderMaterial({
+    name: "P5c4 detail-cloud-sampler GLSL reference",
+    uniforms: {
+      dCloudMap: { value: tex },
+      dMapTransform: { value: mats.mapTransform },
+      gRot: { value: mats.rot }
+    },
+    vertexShader: `
+      varying vec3 vDetailLocal;
+      void main() {
+        vDetailLocal = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec3 vDetailLocal;
+      uniform sampler2D dCloudMap;
+      uniform mat3 dMapTransform;
+      uniform mat3 gRot;
+      ${helpers.shaderUV}
+      ${helpers.cloudSampling}
+      void main() {
+        vec3 n = normalize(gRot * normalize(vDetailLocal));
+        gl_FragColor = vec4(detailCloudUV(detailUV(n)).rgb, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial(tex, mats) {
+  const material = new MeshBasicNodeMaterial({ name: "P5c4 detail-cloud-sampler TSL" });
+  const sampler = createDetailCloudSampler({ cloudMap: tex, mapTransform: mats.mapTransform });
+  const n = uniform(mats.rot).mul(normalize(positionGeometry));
+  const sample = sampler.detailCloudSample(sampler.detailUV(n));
+  material.colorNode = vec4(sample.rgb, float(1.0));
+  return material;
+}
+
+try {
+  const helpers = impl === "glsl" ? await loadProductionHelpers() : null;
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  const { tex, mipLevels } = makeTestTexture(THREE);
+  const mats = makeCaseMatrices();
+  let scene, camera, mesh, material;
+  // Framed inside the cap: no silhouette in view (legacy MSAA lesson).
+  const viewExtent = 0.55;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeGlslMaterial(helpers, tex, mats);
+    mesh = new THREE.Mesh(makeCapGeometry(THREE.PlaneGeometry), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeTslMaterial(tex, mats);
+    mesh = new NodeMesh(makeCapGeometry(NodePlaneGeometry), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5sampler = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    rotYDeg: cfg.rotYDeg,
+    sx: cfg.sx, sy: cfg.sy, rotDeg: cfg.rotDeg,
+    texW: TEX_W, texH: TEX_H, mipLevels,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c4 detail cloud sampler ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5sampler = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c4 detail cloud sampler error: " + window.__p5sampler.error;
+}
+</script>
+</body>
+</html>

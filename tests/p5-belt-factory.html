@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e23 — belt factory GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e23 belt-factory starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import "../src/render/log-depth-glsl.js";
+import {
+  createBeltPropagation,
+  createBeltRocks,
+  createBeltRockPoints,
+  createBeltMarkers,
+  createBeltRockGeometry,
+  createBeltRockPointGeometry,
+  createBeltMarkerGeometry,
+  deriveBeltInstall
+} from "../src/bodies/small-bodies/belt-factory.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { uniform } from "three/tsl";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  Color as NodeColor,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  NormalBlending as NodeNormalBlending
+} from "three/webgpu";
+
+// P5e23 rig: production's real createAsteroidBelt (classic
+// scripts assembled as shipped -- state constants extracted
+// verbatim from app/state.js by anchor, surface-brdf.js and
+// belt-factory.js loaded whole) builds the same seeded belt
+// on both pages. The GLSL page renders the production
+// meshes; the TSL page derives the install from them and
+// renders the belt-factory.tsl.js factories over the same
+// arrays. Per-frame uniform writes the proof needs are
+// applied by hand (uDays, uViewH, uSkipReference,
+// uFocusMarker, updateBeltFocusTarget) exactly as
+// production's updateAsteroidBelt computes them.
+
+const REVISION = "186";
+const status = document.getElementById("status");
+const canvas = document.getElementById("c");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") || "glsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 160) | 0));
+
+// Rocks top out at 100 km across against a 1200-unit AU:
+// at any app-like range they are sub-pixel (production
+// itself ships them invisible behind the points path),
+// so the rock-mesh cases frame the computed focus rock
+// at a radii-scaled offset; the point cases cover the
+// shipped overview range.
+// The close framings aim a CPU-propagated position, so
+// they use small epochs: the GPU solves its mean anomaly
+// in float32, and at JD-scale epochs the accumulated
+// along-track difference reaches ~0.01 units -- wider
+// than a close frame. At tens of days it is ~1e-4.
+const CASES = [
+  { kind: "rocks-close", days: 10.5, show: ["rocks"], rockCount: 6000,
+    camAt: { mode: "largest", k: 30 }, near: 1e-5 },
+  { kind: "rocks-close-epoch", days: 35.25, show: ["rocks"], rockCount: 6000,
+    camAt: { mode: "largest", k: 55 }, near: 1e-5 },
+  { kind: "points-overview", days: 9500.5, show: ["points"], rockCount: 6000,
+    cam: [0, 3200, 5200], tgt: [0, 0, 0], near: 1 },
+  { kind: "points-giant", days: 35.25, show: ["points"], rockCount: 6000,
+    camAt: { mode: "largest", k: 125 }, near: 1e-5 },
+  { kind: "marker-focused-skip", days: 10.5, show: ["rocks", "points", "markers"],
+    rockCount: 6000, skip: 1, focus: true, camAt: { mode: "focus", k: 125 }, near: 1e-5 },
+  { kind: "occluder-logdepth", days: 9500.5, show: ["points"], rockCount: 6000,
+    cam: [0, 1200, 3400], tgt: [2400, 0, 0], near: 1, occluder: true },
+  { kind: "skip-visible", days: 35.25, show: ["points", "markers"], rockCount: 6000,
+    skip: 1, focus: true, camAt: { mode: "focusMid", dist: 1.2 }, near: 0.01 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5belt = { done: false, error: null };
+
+function loadClassic(text, label) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    const url = URL.createObjectURL(new Blob([text], { type: "text/javascript" }));
+    el.src = url;
+    el.onload = () => { URL.revokeObjectURL(url); resolve(); };
+    el.onerror = () => reject(new Error("classic script failed: " + label));
+    document.head.appendChild(el);
+  });
+}
+
+async function fetchText(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error("fetch failed " + path + ": " + r.status);
+  return r.text();
+}
+
+function hashArrays(arrays) {
+  let h = 0x811c9dc5;
+  for (const a of arrays) {
+    const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    for (let i = 0; i < bytes.length; i++) {
+      h ^= bytes[i];
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+const r9 = v => Math.round(v * 1e9) / 1e9;
+
+
+// Measures where the classic GPU vertex actually puts a
+// rock, via transform feedback on production's own belt
+// vertex shader with one assignment-expression splice
+// (`(oScenePos = scenePosition)`) -- the same string-
+// surgery spirit as production's marker splice. Needed
+// because this sandbox's software GL evaluates sin/cos
+// to only ~1e-4 absolute (measured: sin(E) off by
+// 1.0e-4), which at belt radii (~3300 units) displaces
+// GPU rocks ~0.3 units from every CPU solve -- hundreds
+// of frame widths at close-aim ranges. The displacement
+// is shared by the ANGLE and Dawn software paths
+// (measured bit-identical sin/E/x/y), so aiming every
+// page at the classic GPU position is exact for the
+// equivalence being proved; on hardware trig the offset
+// collapses to the float32 floor (~0.002 units).
+let tfMeasure = null;
+function measureGpuPosition(belt, install, index, days) {
+  if (!tfMeasure) {
+    const cv = document.createElement("canvas");
+    const gl = cv.getContext("webgl2");
+    if (!gl) throw new Error("webgl2 unavailable for TF aim measure");
+    const anchor = "vec4(scenePosition + localVertex, 1.0)";
+    const src0 = belt.material.vertexShader;
+    if (src0.split(anchor).length !== 2) throw new Error("TF splice anchor missing");
+    const vs = "#version 300 es\nprecision highp float;\nprecision highp int;\n" +
+      "#define attribute in\n#define varying out\n" +
+      "attribute vec3 position;\nattribute vec3 normal;\n" +
+      "uniform mat4 modelViewMatrix;\nuniform mat4 projectionMatrix;\n" +
+      "out vec3 oScenePos;\n" +
+      src0.replace(anchor, "vec4((oScenePos = scenePosition) + localVertex, 1.0)");
+    const fs = "#version 300 es\nprecision highp float;\nout vec4 c;\nvoid main() { c = vec4(1.0); }";
+    const sh = (t, s2) => {
+      const h = gl.createShader(t); gl.shaderSource(h, s2); gl.compileShader(h);
+      if (!gl.getShaderParameter(h, gl.COMPILE_STATUS)) throw new Error("TF shader: " + gl.getShaderInfoLog(h));
+      return h;
+    };
+    const pr = gl.createProgram();
+    gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs));
+    gl.transformFeedbackVaryings(pr, ["oScenePos"], gl.SEPARATE_ATTRIBS);
+    gl.linkProgram(pr);
+    if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error("TF link: " + gl.getProgramInfoLog(pr));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const outBuf = gl.createBuffer();
+    const tf = gl.createTransformFeedback();
+    tfMeasure = { gl, pr, vao, outBuf, tf };
+  }
+  const { gl, pr, vao, outBuf, tf } = tfMeasure;
+  gl.useProgram(pr); gl.bindVertexArray(vao);
+  const feed = (name, data, comps) => {
+    const loc = gl.getAttribLocation(pr, name);
+    if (loc < 0) return;
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, comps, gl.FLOAT, false, 0, 0);
+  };
+  feed("position", new Float32Array([0, 0, 0]), 3);
+  feed("normal", new Float32Array([0, 1, 0]), 3);
+  feed("aOrbit", install.belt.orbitA.slice(index * 4, index * 4 + 4), 4);
+  feed("bOrbit", install.belt.orbitB.slice(index * 4, index * 4 + 4), 4);
+  feed("aRock", install.belt.rockShapes.slice(index * 4, index * 4 + 4), 4);
+  gl.uniform1f(gl.getUniformLocation(pr, "uDays"), days);
+  gl.uniform1f(gl.getUniformLocation(pr, "uAU"), install.uniforms.au);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf);
+  gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, outBuf);
+  gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, 12, gl.DYNAMIC_READ);
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outBuf);
+  gl.enable(gl.RASTERIZER_DISCARD);
+  gl.beginTransformFeedback(gl.POINTS);
+  gl.drawArrays(gl.POINTS, 0, 1);
+  gl.endTransformFeedback();
+  gl.disable(gl.RASTERIZER_DISCARD);
+  const out = new Float32Array(3);
+  gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, out);
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+  return new THREE.Vector3(out[0], out[1], out[2]);
+}
+
+async function buildSystem() {
+  window.THREE = THREE;
+  window.solarSystem = new THREE.Group();
+  window.objectRegistry = {};
+  window.asteroidTypeEnabled = () => true;
+
+  const stateText = await fetchText("../src/app/state.js");
+  const pick = (re, name) => {
+    const m = stateText.match(re);
+    if (!m) throw new Error("state.js anchor missing: " + name);
+    return m[0];
+  };
+  await loadClassic([
+    pick(/const AU_UNITS = [^;]+;/, "AU_UNITS"),
+    pick(/const KM_PER_AU = [^;]+;/, "KM_PER_AU"),
+    pick(/const km2u = [^;]+;/, "km2u"),
+    pick(/const ASTEROID_RENDER = \{[^}]+\};/, "ASTEROID_RENDER")
+  ].join("\n"), "state-head");
+  await loadClassic(await fetchText("../src/render/brdf/surface-brdf.js"), "surface-brdf.js");
+  await loadClassic(await fetchText("../src/bodies/small-bodies/belt-factory.js"), "belt-factory.js");
+
+  window.createAsteroidBelt();
+  const belt = window.asteroidBelt;
+  if (!belt) throw new Error("createAsteroidBelt produced no belt");
+
+  // Per-case drives, mirroring updateAsteroidBelt's writes.
+  const days = cfg.days;
+  belt.material.uniforms.uDays.value = days;
+  belt.material.uniforms.uViewH.value = size;
+  belt.material.uniforms.uSkipReference.value = cfg.skip ? 1 : 0;
+  window.updateBeltFocusTarget(days);
+  const markers = belt.userData.markers;
+  if (markers) markers.material.uniforms.uFocusMarker.value =
+    cfg.focus ? belt.userData.focusIndex : -1;
+
+  const install = deriveBeltInstall(belt);
+
+  belt.visible = cfg.show.includes("rocks");
+  belt.geometry.instanceCount = cfg.rockCount;
+  const points = belt.userData.rockPoints;
+  points.visible = cfg.show.includes("points");
+  points.geometry.setDrawRange(0, cfg.rockCount);
+  if (markers) markers.visible = cfg.show.includes("markers");
+
+  const target = window.objectRegistry.asteroidbelt;
+  const focusPos = target.position;
+  const focusRockRadius = install.belt.rockShapes[belt.userData.focusIndex * 4];
+
+  let camPos, camTgt;
+  if (cfg.camAt) {
+    let aimPos, aimRadius;
+    if (cfg.camAt.mode === "largest") {
+      // Aim at the largest rock on the lit side of
+      // production's rock-point lighting: that shader
+      // dots a view-space vector with a model-space one,
+      // so a centred rock's light is -z/|position| of
+      // its scene position -- the z>0 half of the belt
+      // sits at the 0.025 floor and rounds to black at
+      // close range (measured; the port preserves the
+      // formula). Selection uses a rig-side CPU solve
+      // mirroring updateBeltFocusTarget, but the aim
+      // itself is measured off the classic GPU vertex
+      // (see measureGpuPosition): CPU aims land ~0.3
+      // units off the GPU rock in this sandbox.
+      const cpuPos = (i) => {
+        const oA = install.belt.orbitA, oB = install.belt.orbitB;
+        const a = oA[i*4], e = oA[i*4+1], inc = oA[i*4+2], node = oA[i*4+3], peri = oB[i*4];
+        let M = (oB[i*4+1] + oB[i*4+2] * days) % (Math.PI * 2);
+        if (M < 0) M += Math.PI * 2;
+        let E = M;
+        for (let k = 0; k < 5; k++) E -= (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+        const dA = a * install.uniforms.au;
+        const x = dA * (Math.cos(E) - e), y = dA * Math.sqrt(1 - e*e) * Math.sin(E);
+        const cw = Math.cos(peri), sw = Math.sin(peri), co = Math.cos(node), so = Math.sin(node);
+        const ci = Math.cos(inc), si = Math.sin(inc);
+        return new THREE.Vector3(
+          (cw*co - sw*so*ci) * x + (-sw*co - cw*so*ci) * y,
+          sw*si * x + cw*si * y,
+          -((cw*so + sw*co*ci) * x + (-sw*so + cw*co*ci) * y));
+      };
+      let li = -1;
+      for (let i = 0; i < install.belt.count; i++) {
+        const p = cpuPos(i);
+        if (-p.z / p.length() < 0.7) continue;
+        if (li < 0 || install.belt.rockShapes[i * 4] > install.belt.rockShapes[li * 4]) li = i;
+      }
+      if (li < 0) throw new Error("no lit-side rock found");
+      aimPos = measureGpuPosition(belt, install, li, days);
+      aimRadius = install.belt.rockShapes[li * 4];
+    } else if (cfg.camAt.mode === "focusMid") {
+      // Frame both the CPU focus position (where the
+      // marker rides) and the GPU position of the same
+      // rock (where its point disc would sit unskipped):
+      // a broken skip shows up as an extra disc.
+      const gpuFocus = measureGpuPosition(belt, install, belt.userData.focusIndex, days);
+      aimPos = focusPos.clone().add(gpuFocus).multiplyScalar(0.5);
+      aimRadius = focusRockRadius;
+    } else {
+      aimPos = focusPos.clone();
+      aimRadius = focusRockRadius;
+    }
+    // View from a 0.6 rad phase angle off the sun line:
+    // the anti-sun hemisphere sits at the 0.025 light
+    // floor and rounds to black at this scale.
+    const sunDir = aimPos.clone().multiplyScalar(-1).normalize();
+    const tangent = new THREE.Vector3().crossVectors(sunDir, new THREE.Vector3(0, 1, 0));
+    if (tangent.lengthSq() < 1e-6) tangent.set(1, 0, 0);
+    tangent.normalize();
+    const dir = sunDir.multiplyScalar(Math.cos(0.6)).addScaledVector(tangent, Math.sin(0.6)).normalize();
+    const dist = cfg.camAt.dist || Math.max(cfg.camAt.k * aimRadius, 0.004);
+    camPos = aimPos.clone().addScaledVector(dir, dist);
+    camTgt = aimPos;
+  } else {
+    camPos = new THREE.Vector3(...cfg.cam);
+    camTgt = new THREE.Vector3(...cfg.tgt);
+  }
+
+  const digest = [
+    hashArrays([install.belt.orbitA, install.belt.orbitB, install.belt.rockShapes]),
+    String(install.belt.count),
+    String(belt.userData.focusIndex),
+    r9(days), r9(focusPos.x), r9(focusPos.y), r9(focusPos.z),
+    r9(camPos.x), r9(camPos.y), r9(camPos.z)
+  ].join(":");
+
+  return { belt, points, markers, target, install, camPos, camTgt, digest, days };
+}
+
+function checkDerivation(sys) {
+  const { belt, install } = sys;
+  const eq = (a, b, k) => { if (a !== b) throw new Error(`derive ${k}: ${a} vs ${b}`); };
+  const u = belt.material.uniforms;
+  eq(install.uniforms.days, u.uDays.value, "uDays");
+  eq(install.uniforms.au, u.uAU.value, "uAU");
+  eq(install.uniforms.viewH, u.uViewH.value, "uViewH");
+  eq(install.uniforms.skipReference, u.uSkipReference.value, "uSkipReference");
+  eq(install.focusIndex, belt.userData.focusIndex, "focusIndex");
+  eq(install.belt.count, 6000, "count");
+  if (install.belt.orbitA !== belt.userData.orbitAAll) throw new Error("orbitA identity");
+  if (install.belt.orbitB !== belt.userData.orbitBAll) throw new Error("orbitB identity");
+  if (install.belt.rockShapes !== belt.userData.rockShapesAll) throw new Error("rockShapes identity");
+}
+
+function makeCamera(NS, sys) {
+  const camera = new NS.PerspectiveCamera(40, 1, cfg.near, 30000);
+  camera.position.set(sys.camPos.x, sys.camPos.y, sys.camPos.z);
+  camera.lookAt(sys.camTgt.x, sys.camTgt.y, sys.camTgt.z);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  return camera;
+}
+
+function buildGlslScene(sys) {
+  const scene = new THREE.Scene();
+  scene.add(window.solarSystem);
+  if (cfg.occluder) {
+    const dir = sys.camTgt.clone().sub(sys.camPos).normalize();
+    const occ = new THREE.Mesh(
+      new THREE.SphereGeometry(500, 32, 16),
+      new THREE.MeshBasicMaterial());
+    occ.material.color.setRGB(0.04, 0.04, 0.045);
+    occ.position.copy(sys.camPos).addScaledVector(dir, 1800);
+    occ.updateMatrixWorld(true);
+    scene.add(occ);
+  }
+  return { scene, camera: makeCamera(THREE, sys) };
+}
+
+function buildTslScene(sys) {
+  const { belt, install } = sys;
+  const scene = new NodeScene();
+  const days = uniform(sys.days);
+  const viewH = uniform(size);
+  const skip = uniform(cfg.skip ? 1 : 0);
+  const focusMarker = uniform(cfg.focus ? belt.userData.focusIndex : -1);
+  const prop = createBeltPropagation({
+    days,
+    au: install.uniforms.au,
+    skipReference: skip,
+    referenceOrbit: install.uniforms.referenceOrbit
+  });
+  const viewport = uniform(new NodeNS.Vector2(size, size));
+
+  const slotMaterial = (slots, state) => {
+    const m = new MeshBasicNodeMaterial();
+    m.vertexNode = slots.vertexNode;
+    m.colorNode = slots.colorNode;
+    if (slots.depthNode) m.depthNode = slots.depthNode;
+    m.transparent = state.transparent;
+    m.depthWrite = state.depthWrite;
+    m.depthTest = state.depthTest;
+    m.toneMapped = false;
+    return m;
+  };
+
+  if (cfg.show.includes("rocks")) {
+    // Same deterministic base rock, built under the node
+    // namespace so its attributes are node-native.
+    window.THREE = NodeNS;
+    const base = window.createProceduralRockGeometry(2);
+    window.THREE = THREE;
+    const geo = createBeltRockGeometry(NodeNS, base, install.belt);
+    geo.instanceCount = cfg.rockCount;
+    geo.boundingSphere = new NodeNS.Sphere(new NodeNS.Vector3(0, 0, 0), 4.1 * 1200);
+    const mesh = new NodeMesh(geo, slotMaterial(
+      createBeltRocks({ propagation: prop }), install.states.rocks));
+    mesh.frustumCulled = true;
+    scene.add(mesh);
+  }
+  if (cfg.show.includes("points")) {
+    const geo = createBeltRockPointGeometry(NodeNS, install.belt);
+    geo.instanceCount = cfg.rockCount;
+    geo.boundingSphere = new NodeNS.Sphere(new NodeNS.Vector3(0, 0, 0), 4.1 * 1200);
+    const mat = slotMaterial(
+      createBeltRockPoints({ propagation: prop, viewH, viewport }), install.states.points);
+    mat.blending = NodeNormalBlending;
+    const mesh = new NodeMesh(geo, mat);
+    mesh.frustumCulled = true;
+    scene.add(mesh);
+  }
+  if (cfg.show.includes("markers")) {
+    const geo = createBeltMarkerGeometry(NodeNS, install.belt);
+    geo.boundingSphere = new NodeNS.Sphere(new NodeNS.Vector3(0, 0, 0), 4.1 * 1200);
+    const mat = slotMaterial(
+      createBeltMarkers({
+        propagation: prop, viewH, viewport, focusMarker,
+        focusPosition: uniform(sys.target.position)
+      }), install.states.markers);
+    mat.blending = NodeNormalBlending;
+    const mesh = new NodeMesh(geo, mat);
+    mesh.frustumCulled = true;
+    scene.add(mesh);
+  }
+  if (cfg.occluder) {
+    const occMat = new MeshBasicNodeMaterial();
+    occMat.color.setRGB(0.04, 0.04, 0.045);
+    const occ = new NodeMesh(new NodeSphereGeometry(500, 32, 16), occMat);
+    const dir = sys.camTgt.clone().sub(sys.camPos).normalize();
+    occ.position.copy(sys.camPos).addScaledVector(dir, 1800);
+    occ.updateMatrixWorld(true);
+    scene.add(occ);
+  }
+  return { scene, camera: makeCamera(NodeNS, sys) };
+}
+
+try {
+  const sys = await buildSystem();
+  checkDerivation(sys);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(sys) : buildTslScene(sys);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5belt = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    digest: sys.digest,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e23 belt-factory ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5belt = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e23 belt-factory error: " + window.__p5belt.error;
+}
+</script>
+</body>
+</html>

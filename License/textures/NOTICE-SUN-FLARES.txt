@@ -1,1 +1,0 @@
-The Solister Sun lens-flare textures SE_flare.png and SE_ghosts.png were copied from the user-supplied Flares.zip.txt attachment. The archive contained no license or attribution file. These assets are used as supplied; confirm redistribution rights and any required attribution before publishing the project.

@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c2 — ground-atmosphere haze GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c2 ground atmosphere starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createGroundAtmosphere } from "../src/ui/planet-detail.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { positionGeometry, uv, vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+// Values are in the production effect's own units: local positions on a
+// sphere of the given radius, scale height and top as fractions of radius.
+const CASES = [
+  {
+    Camera: [0.15, 0.1, 1.18], sun: [0.25, 0.2, 0.95], metricScale: [1, 1, 1],
+    radius: 1.0, scaleHeight: 0.09, top: 0.4, opticalScale: 0.9,
+    scatterGain: 0.8, color: [0.35, 0.55, 1.0], strength: 1.0
+  },
+  {
+    Camera: [1.55, 0.3, 0.65], sun: [1.0, 0.1, 0.05], metricScale: [1.15, 1.0, 1.3],
+    radius: 1.2, scaleHeight: 0.05, top: 0.22, opticalScale: 1.6,
+    scatterGain: 1.1, color: [0.9, 0.55, 0.3], strength: 0.75
+  },
+  {
+    Camera: [-0.32, 0.72, 1.52], sun: [-0.8, -0.2, -0.4], metricScale: [1.0, 1.4, 1.05],
+    radius: 0.8, scaleHeight: 0.16, top: 0.5, opticalScale: 2.4,
+    scatterGain: 0.5, color: [0.5, 0.7, 0.9], strength: 0.9
+  },
+  {
+    Camera: [0.15, 0.1, 1.18], sun: [0.25, 0.2, 0.95], metricScale: [1, 1, 1],
+    radius: 1.0, scaleHeight: 0.09, top: 0.4, opticalScale: 0.9,
+    scatterGain: 0.8, color: [0.35, 0.55, 1.0], strength: 0.0
+  }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5ground = { done: false, error: null };
+
+async function loadGroundEffect() {
+  // Extract the exact effect template literal from installGroundAtmosphere
+  // in planet-detail.js so the GLSL reference cannot drift from production.
+  const text = await fetch("../src/ui/planet-detail.js").then(r => {
+    if (!r.ok) throw new Error("planet-detail.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const fnStart = text.indexOf("function installGroundAtmosphere");
+  if (fnStart < 0) throw new Error("installGroundAtmosphere not found");
+  const tickChar = String.fromCharCode(96);
+  const marker = "const effect = " + tickChar;
+  const start = text.indexOf(marker, fnStart);
+  if (start < 0) throw new Error("ground-atmosphere effect not found");
+  const tick = start + marker.length - 1;
+  const end = text.indexOf(tickChar + ";", tick);
+  if (end < 0) throw new Error("ground-atmosphere effect terminator not found");
+  return Function("return " + text.slice(tick, end + 1))();
+}
+
+function makeCapGeometry(GeometryClass) {
+  // A finely segmented spherical cap: every vertex is a body-local surface
+  // point on the case radius, as production geometry positions are. Both
+  // sides read that same interpolated local position (the classic varying
+  // in GLSL, positionGeometry in TSL).
+  const geometry = new GeometryClass(2, 2, 160, 160);
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i) * 1.15;
+    const y = pos.getY(i) * 1.15;
+    const len = Math.hypot(x, y, 0.75);
+    pos.setXYZ(i, x / len * cfg.radius, y / len * cfg.radius, 0.75 / len * cfg.radius);
+  }
+  pos.needsUpdate = true;
+  return geometry;
+}
+
+const BASE_GLSL = `vec3 base = vec3(0.25 + 0.45 * vUv.x, 0.20 + 0.50 * vUv.y, 0.55 - 0.30 * vUv.x);`;
+
+function makeGlslMaterial(effect) {
+  return new THREE.ShaderMaterial({
+    name: "P5c2 ground-atmosphere GLSL reference",
+    uniforms: {
+      uGroundAtmoCamera: { value: new THREE.Vector3(cfg.Camera[0], cfg.Camera[1], cfg.Camera[2]) },
+      uGroundAtmoSun: { value: new THREE.Vector3(cfg.sun[0], cfg.sun[1], cfg.sun[2]) },
+      uGroundAtmoMetricScale: { value: new THREE.Vector3(cfg.metricScale[0], cfg.metricScale[1], cfg.metricScale[2]) },
+      uGroundAtmoRadius: { value: cfg.radius },
+      uGroundAtmoScaleHeight: { value: cfg.scaleHeight },
+      uGroundAtmoTop: { value: cfg.top },
+      uGroundAtmoOpticalScale: { value: cfg.opticalScale },
+      uGroundAtmoScatterGain: { value: cfg.scatterGain },
+      uGroundAtmoColor: { value: new THREE.Color(cfg.color[0], cfg.color[1], cfg.color[2]) },
+      uGroundAtmoStrength: { value: cfg.strength }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vGroundAtmoLocal;
+      void main() {
+        vUv = uv;
+        vGroundAtmoLocal = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      varying vec3 vGroundAtmoLocal;
+      uniform vec3 uGroundAtmoCamera;
+      uniform vec3 uGroundAtmoSun;
+      uniform vec3 uGroundAtmoMetricScale;
+      uniform float uGroundAtmoRadius;
+      uniform float uGroundAtmoScaleHeight;
+      uniform float uGroundAtmoTop;
+      uniform float uGroundAtmoOpticalScale;
+      uniform float uGroundAtmoScatterGain;
+      uniform vec3 uGroundAtmoColor;
+      uniform float uGroundAtmoStrength;
+      struct ReflectedLight {
+        vec3 directDiffuse;
+        vec3 directSpecular;
+        vec3 indirectDiffuse;
+        vec3 indirectSpecular;
+      };
+      void main() {
+        ${BASE_GLSL}
+        ReflectedLight reflectedLight;
+        reflectedLight.directDiffuse = base * 0.45;
+        reflectedLight.directSpecular = base * 0.10;
+        reflectedLight.indirectDiffuse = base * 0.30;
+        reflectedLight.indirectSpecular = base * 0.05;
+        vec3 totalEmissiveRadiance = base * 0.10;
+        {
+        ${effect}
+        }
+        vec3 outgoing = reflectedLight.directDiffuse + reflectedLight.directSpecular
+          + reflectedLight.indirectDiffuse + reflectedLight.indirectSpecular
+          + totalEmissiveRadiance;
+        gl_FragColor = vec4(outgoing * 0.85, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P5c2 ground-atmosphere TSL" });
+  const ground = createGroundAtmosphere({
+    Camera: cfg.Camera,
+    sun: cfg.sun,
+    metricScale: cfg.metricScale,
+    radius: cfg.radius,
+    scaleHeight: cfg.scaleHeight,
+    top: cfg.top,
+    opticalScale: cfg.opticalScale,
+    scatterGain: cfg.scatterGain,
+    color: cfg.color,
+    strength: cfg.strength
+  });
+  const pUv = uv();
+  const base = vec3(
+    float(0.25).add(pUv.x.mul(0.45)),
+    float(0.20).add(pUv.y.mul(0.50)),
+    float(0.55).sub(pUv.x.mul(0.30)));
+  const outgoing = ground.groundAtmosphereApply(positionGeometry, base);
+  material.colorNode = vec4(outgoing.mul(0.85), float(1.0));
+  return material;
+}
+
+try {
+  const effect = impl === "glsl" ? await loadGroundEffect() : "";
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  // Frame inside the cap so no silhouette is in view: the legacy seam's
+  // canvas is multisampled, and a boundary ring would compare rasterizer
+  // coverage instead of this arithmetic (the P4b sphere lesson).
+  const viewExtent = cfg.radius * 0.55;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeGlslMaterial(effect);
+    mesh = new THREE.Mesh(makeCapGeometry(THREE.PlaneGeometry), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeTslMaterial();
+    mesh = new NodeMesh(makeCapGeometry(NodePlaneGeometry), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5ground = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    radius: cfg.radius,
+    strength: cfg.strength,
+    samples: 5,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c2 ground atmosphere ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5ground = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c2 ground atmosphere error: " + window.__p5ground.error;
+}
+</script>
+</body>
+</html>

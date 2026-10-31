@@ -44,8 +44,8 @@ export class NearEarthObjects {
         this.orbitScale = typeof options.orbitScale === "function" ? options.orbitScale : null;
         this.rockMinD = 0;
         this.moduleBuild = "r27";
-        this.meshes = options.meshes !== false;
-        this.wantMeshes = true;
+        this.meshes = options.meshes === true;
+        this.wantMeshes = false;
         this.rocksDrawn = 0;
         this.innerDrawn = 0;
         this._pending = false;
@@ -159,7 +159,7 @@ export class NearEarthObjects {
                     value: 1080
                 }
             },
-            vertexShader: PROPAGATION_HEAD + `${LDB_VERTEX_PARS}\n                attribute vec3 color;\n                attribute float aSize;\n                uniform float uKm; uniform float uViewH;\n                varying vec3 vMarkerColor;\n                varying float vLight;\n                varying float vCoverage;\n                void main() {\n                    vec3 pos = propagateSmallBodyG();\n                    vec4 mv = modelViewMatrix * vec4(pos, 1.0);\n                    float d = max(1e-4, -mv.z);\n                    float radius = max(aSize * uKm, 0.0);\n                    float physicalPixels = max(0.0, 2.0 * radius * (0.5 * projectionMatrix[1][1] * uViewH) / d);\n                    gl_PointSize = max(physicalPixels, 1.0);\n                    vCoverage = min(1.0, physicalPixels * physicalPixels / (gl_PointSize * gl_PointSize));\n                    vLight = 0.025 + 0.975 * max(dot(normalize(-mv.xyz), normalize(-pos)), 0.0);\n                    vMarkerColor = color;\n                    gl_Position = projectionMatrix * mv;${LDB_VERTEX_TAIL}\n                }`,
+            vertexShader: PROPAGATION_HEAD + `${LDB_VERTEX_PARS}\n                attribute vec3 color;\n                attribute float aSize;\n                uniform float uKm; uniform float uViewH;\n                varying vec3 vMarkerColor;\n                varying float vLight;\n                varying float vCoverage;\n                void main() {\n                    vec3 pos = propagateSmallBodyG();\n                    vec4 mv = modelViewMatrix * vec4(pos, 1.0);\n                    float d = max(1e-4, -mv.z);\n                    float radius = max(aSize * uKm, 0.0);\n                    float physicalPixels = max(0.0, 2.0 * radius * (0.5 * projectionMatrix[1][1] * uViewH) / d);\n                    float pointPixels = max(physicalPixels, 1.7);\n                    gl_PointSize = pointPixels;\n                    // Visibility floor, same idea as the Kuiper markers' fixed\n                    // pixel size: a sub-pixel body still draws as a readable\n                    // dot. Tying alpha to the true coverage made every\n                    // kilometre-scale NEA invisible (coverage ~ 1e-12).\n                    vCoverage = physicalPixels >= 1.0 ? min(1.0, physicalPixels * physicalPixels / (pointPixels * pointPixels)) : 0.85;\n                    vLight = 0.025 + 0.975 * max(dot(normalize(-mv.xyz), normalize(-pos)), 0.0);\n                    vMarkerColor = color;\n                    gl_Position = projectionMatrix * mv;${LDB_VERTEX_TAIL}\n                }`,
             fragmentShader: LDB_FRAGMENT_PARS + "varying vec3 vMarkerColor;varying float vLight;varying float vCoverage;void main(){" + LDB_FRAGMENT_HEAD + "float dd=dot(gl_PointCoord-0.5,gl_PointCoord-0.5)*4.0;" + "if(dd>1.0)discard;gl_FragColor=vec4(vMarkerColor*(0.62+0.38*sqrt(max(0.0,1.0-dd))),vCoverage);}",
             transparent: true,
             depthTest: true,
@@ -174,11 +174,13 @@ export class NearEarthObjects {
             rocks.rocks.geometry.boundingSphere = populationBounds();
             rocks.rocks.frustumCulled = true;
         }
-        const sizes = rocks ? rocks.size : new Float32Array(n);
+        const saneRadiusKm = value => Number.isFinite(value) && value > 0 ? Math.min(value, 600) : 0;
+        const sizes = new Float32Array(n);
+        for (let k = 0; k < n; k++) sizes[k] = saneRadiusKm(this.catalog.radiusKm[pack.indices[k]]);
         if (rocks && pack.attrs) {
             for (let k = 0; k < rocks.cap; k++) {
                 const j = pack.indices[k];
-                rocks.size[k] = this.catalog.radiusKm[j] || 1;
+                rocks.size[k] = saneRadiusKm(this.catalog.radiusKm[j]);
                 rocks.inner[k] = this.isInnerAu(this.catalog.a[j], this.catalog.e[j]) ? 1 : 0;
             }
             rocks.rocks.geometry.attributes.aSize.needsUpdate = true;
@@ -275,10 +277,9 @@ export class NearEarthObjects {
         const uniforms = group.markers.material.uniforms;
         uniforms.uDays.value = days;
         uniforms.uViewH.value = this.renderer.domElement && this.renderer.domElement.height || uniforms.uViewH.value;
-        if (group.rocks?.rocks.material.uniforms) {
-            const rockUniforms = group.rocks.rocks.material.uniforms;
-            rockUniforms.uDays.value = days;
+        if (group.rocks) {
             group.rocks.rocks.geometry.instanceCount = this.wantMeshes ? group.rocks.cap : 0;
+            if (this.wantMeshes && group.rocks.rocks.material.uniforms) group.rocks.rocks.material.uniforms.uDays.value = days;
         }
         this.rocksDrawn = this.wantMeshes ? group.rocks?.cap || 0 : 0;
         const now = performance.now();
@@ -328,7 +329,7 @@ export class NearEarthObjects {
                 closest = candidate;
             } else if (!next || candidate.moidAu < next.moidAu) next = candidate;
         }
-        if (group.rocks) {
+        if (group.rocks && this.wantMeshes) {
             const sizes = [];
             for (const index of group.list) {
                 if (!catalog.visible[index]) continue;
@@ -357,7 +358,7 @@ export class NearEarthObjects {
             name: "Near-Earth asteroids",
             kind: "Dynamical group (perihelion inside 1.3 AU)",
             tagline: available ? "Catalogued small bodies propagated from fitted orbital elements. This compact analytic model does not integrate close encounters; use JPL Horizons for precision ephemerides." : "The numbered-orbit catalogue is unavailable. No synthetic asteroid positions are substituted.",
-            stats: [ [ "Drawn", available ? `${group?.drawn ?? 0} of ${(row?.catalogued ?? 0).toLocaleString("en-US")} numbered orbits` : "0 — catalogue unavailable" ], [ "Estimated population", `${population.toLocaleString("en-US")} bodies over 140 m (NEOMOD3 completeness-corrected)` ], [ "Closest now", stats.closest ? `${stats.closest.name} — MOID ${stats.closest.moidAu.toFixed(3)} AU, ${stats.closest.distanceAu.toFixed(3)} AU away, about ${stats.closest.diameterKm.toFixed(1)} km` : "—" ], [ "Next closest", stats.next ? `${stats.next.name} — MOID ${stats.next.moidAu.toFixed(3)} AU` : "—" ], [ "Potentially hazardous", stats.pha ? `${stats.pha} catalogued objects in the active sample` : "—" ], [ "Rock meshes", group?.rocks ? this.rocksDrawn ? `${this.rocksDrawn} largest drawn; smallest included size ${this.rockMinD.toFixed(1)} km; true-size rendering` : `waiting for bodies at or above ${this.rockMinD.toFixed(1)} km` : "Not built" ], [ "Markers", "Blue-grey NEAs; salmon potentially hazardous asteroids; pale inner objects" ], [ "Orbit model", "Analytic propagation from catalogue elements; close encounters are not integrated" ], [ "Data source", available ? `JPL SBDB — ${this.catalogState}` : `JPL SBDB — ${this.catalogState}` ] ]
+            stats: [ [ "Drawn", available ? `${group?.drawn ?? 0} of ${(row?.catalogued ?? 0).toLocaleString("en-US")} numbered orbits` : "0 — catalogue unavailable" ], [ "Estimated population", `${population.toLocaleString("en-US")} bodies over 140 m (NEOMOD3 completeness-corrected)` ], [ "Closest now", stats.closest ? `${stats.closest.name} — MOID ${stats.closest.moidAu.toFixed(3)} AU, ${stats.closest.distanceAu.toFixed(3)} AU away, about ${stats.closest.diameterKm.toFixed(1)} km` : "—" ], [ "Next closest", stats.next ? `${stats.next.name} — MOID ${stats.next.moidAu.toFixed(3)} AU` : "—" ], [ "Potentially hazardous", stats.pha ? `${stats.pha} catalogued objects in the active sample` : "—" ], [ "Rock meshes", group?.rocks ? (this.wantMeshes ? (this.rocksDrawn ? `${this.rocksDrawn} largest drawn; smallest included size ${this.rockMinD.toFixed(1)} km; true-size rendering` : `waiting for bodies at or above ${this.rockMinD.toFixed(1)} km`) : "Off by design — the inner system draws markers only") : "Not built" ], [ "Markers", "Blue-grey NEAs; salmon potentially hazardous asteroids; pale inner objects" ], [ "Orbit model", "Analytic propagation from catalogue elements; close encounters are not integrated" ], [ "Data source", available ? `JPL SBDB — ${this.catalogState}` : `JPL SBDB — ${this.catalogState}` ] ]
         };
     }
 }

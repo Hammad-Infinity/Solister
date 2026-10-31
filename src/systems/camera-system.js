@@ -64,7 +64,13 @@ const _cameraWorldUp = new THREE.Vector3(0, 1, 0);
 
 const AUTO_LANDING_DISTANCE_RATIO = .32;
 
-const LANDING_APPROACH_SPLIT = .72;
+// Landing altitude easing, per second.
+const LANDING_CLEARANCE_RATE = 5.5;
+
+const SURFACE_RELEASE_RATIO = .45;
+
+// Only used to switch terrain detail on for the final part of the approach. It no longer splits the animation.
+const APPROACH_SPLIT = .7;
 
 const SURFACE_DETAIL_ENTER_RATIO = 1.045;
 
@@ -81,9 +87,7 @@ function setSurfacePerformanceMode(active) {
     globalThis.setSurfaceRenderMode?.(next);
 }
 
-const CAMERA_KEYBOARD_DOLLY_RATE = 1.4;
-
-const CAMERA_KEYBOARD_PAN_RATE = .22;
+const CAMERA_KEYBOARD_MOVE_RATE = .095;
 
 const CAMERA_SURFACE_REBASE_KEYS = Object.freeze([ "mercury", "venus", "earth", "moon", "mars", "jupiter", "saturn", "uranus", "neptune", "pluto" ]);
 
@@ -98,6 +102,53 @@ let _cameraInputInstalled = false;
 let _cameraLookDrag = null;
 
 let _cameraRightPointer = null;
+
+let _cameraRightDrag = null;
+
+const _orbitOffset = new THREE.Vector3;
+
+const _orbitForward = new THREE.Vector3;
+
+const _orbitRight = new THREE.Vector3;
+
+// How close the camera is to the surface of whatever it is looking at,
+// expressed as a fraction of that body's radius. Near the ground a drag has to
+// move far less than it does in deep space, or the user overshoots the horizon with a twitch.
+function _surfaceProximity() {
+    const target = controls.target;
+    if (!target) return 0;
+    const dist = camera.position.distanceTo(target);
+    const radius = focusedObject?.geometry?.parameters?.radius
+        || focusedObject?.userData?.radius
+        || 0;
+    if (!(radius > 0) || !(dist > 0)) return 0;
+    const altitude = Math.max(dist - radius, 0);
+    // 1 when sitting on the surface, 0 once you are a radius clear of it.
+    return Math.min(1, Math.max(0, 1 - altitude / radius));
+}
+
+// Scales a control speed down as the camera approaches a surface. Floor of
+// 0.04 keeps the view controllable rather than sluggish when landed.
+function _proximityScale() {
+    return Math.max(0.04, 1 - 0.96 * _surfaceProximity());
+}
+
+function _orbitCameraByDrag(dragX, dragY) {
+    const height = renderer.domElement?.clientHeight || window.innerHeight || 1;
+    const rate = (controls.rotateSpeed || .7) * 2 * Math.PI / height * _proximityScale();
+    _orbitOffset.subVectors(camera.position, controls.target);
+    if (_orbitOffset.lengthSq() < 1e-24) return;
+    _orbitForward.copy(_orbitOffset).normalize().negate();
+    _orbitRight.crossVectors(_orbitForward, camera.up);
+    if (_orbitRight.lengthSq() < 1e-12) return;
+    _orbitRight.normalize();
+    const yaw = rate * dragX, pitch = rate * dragY;
+    _orbitOffset.applyAxisAngle(camera.up, -yaw);
+    _orbitOffset.applyAxisAngle(_orbitRight, -pitch);
+    camera.up.applyAxisAngle(_orbitRight, -pitch).normalize();
+    camera.position.copy(controls.target).add(_orbitOffset);
+    distanceReadout?.noteInput();
+}
 
 function bodyOnScreen(obj, radius) {
     if (!obj) return false;
@@ -152,6 +203,7 @@ function applyCameraDefaults() {
     camera.far = Math.max(12e5, controls.maxDistance * 2, SKY_RADIUS * 1.5);
     camera.updateProjectionMatrix();
     camera.position.copy(DEFAULT_CAM_POS);
+    _clipPrevValid = false;
     solarSystem.getWorldPosition(_cameraSystemCenter);
     controls.target.copy(_cameraSystemCenter);
     controls.update();
@@ -208,7 +260,7 @@ function getZoomBounds(key, mesh) {
 function cinematicFocusDuration(fromCam, toCam) {
     const span = fromCam.distanceTo(toCam);
     const reference = Math.max(1e-4, Math.min(fromCam.length(), toCam.length()));
-    return 1.8 + 1.15 * Math.min(1, span / reference);
+    return 2.6 + 1.7 * Math.min(1, span / reference);
 }
 
 function resetCameraControlMomentum() {
@@ -224,7 +276,34 @@ function resetCameraControlMomentum() {
 
 function detachCameraFromFocus() {
     cameraFocusFollowEnabled = false;
-    if (focusedObject?.userData) focusedObject.userData._prevPos = null;
+    // _prevPos is deliberately kept: the follow block keeps tracking comets and
+    // ephemeris moons through a drag, and clearing it here dropped one frame of
+    // the body's motion at the start of every click.
+}
+
+function releaseFocusForManualMotion() {
+
+    if (focusedObject?.userData?.isComet || focusedObject?.userData?.isEphemerisMoon || focusedObject?.userData?.extraEphemeris) return false;
+    if (landingState || camTransition?.landing) {
+        detachCameraFromFocus();
+        return;
+    }
+    if (!focusedObject || focusedObject === solarSystem) return;
+    cameraFocusFollowEnabled = false;
+    if (focusedObject.userData) focusedObject.userData._prevPos = null;
+    focusedObject = null;
+    equatorialGrid?.setFocused(null);
+    updateSurfaceGridControl(null);
+    distanceReadout?.noteInput();
+    hideFocusCard();
+
+    if (focusSectionEl) setDockSectionOpen(focusSectionEl, false);
+    unfocusBtn.hidden = true;
+    _focusBounds = null;
+    resetBodySelect();
+    const keep = camera.position.distanceTo(controls.target);
+    controls.minDistance = Math.min(.05, Math.max(keep * .5, 1e-8));
+    controls.maxDistance = systemMaxDistance();
 }
 
 function focusOnObject(mesh, beltView = "close") {
@@ -465,7 +544,10 @@ function unfocusKeepCamera() {
     cancelZoomOnFocusChange();
     _focusBounds = null;
     resetBodySelect();
-    controls.minDistance = .05;
+    // Keep the camera exactly where it is: a hard .05 floor threw it 500x away
+    // from a comet the moment focus was released.
+    const keep = camera.position.distanceTo(controls.target);
+    controls.minDistance = Math.min(.05, Math.max(keep * .5, 1e-8));
     controls.maxDistance = systemMaxDistance();
     return true;
 }
@@ -539,17 +621,15 @@ function _enforceLandingSurfaceClearance(body) {
     const eyeHeight = cameraEyeHeightUnits(body);
     const clearance = landedHere ? Math.max(landingState.surfaceClearance || 0, eyeHeight) : eyeHeight;
     if (landedHere) {
-        body.getWorldQuaternion(_cameraLandingQuaternion);
-        _cameraLandingSurfaceNormal.copy(landingState.surfaceNormalLocal || _cameraWorldUp).applyQuaternion(_cameraLandingQuaternion).normalize();
-        _cameraLandingNormalRotation.setFromUnitVectors(_cameraLandingSurfaceNormal, _cameraLandingHitNormal);
-        _cameraLandingTargetOffset.subVectors(controls.target, camera.position).applyQuaternion(_cameraLandingNormalRotation);
-        camera.up.applyQuaternion(_cameraLandingNormalRotation).normalize();
-        controls.target.copy(camera.position).add(_cameraLandingTargetOffset);
-        _cameraLandingPush.copy(_cameraLandingHitPoint).addScaledVector(_cameraLandingHitNormal, clearance).sub(camera.position);
-        camera.position.add(_cameraLandingPush);
-        controls.target.add(_cameraLandingPush);
-        body.getWorldQuaternion(_cameraLandingQuaternion).invert();
-        landingState.surfaceNormalLocal.copy(_cameraLandingHitNormal).applyQuaternion(_cameraLandingQuaternion).normalize();
+
+        if (signedHeight < clearance) {
+            _cameraLandingPush.copy(_cameraLandingHitNormal).multiplyScalar(clearance - signedHeight);
+            camera.position.add(_cameraLandingPush);
+            controls.target.add(_cameraLandingPush);
+        }
+        // Leaving the surface is handled in exactly one place now
+        // (updateLandingPose, at SURFACE_RELEASE_RATIO). This correction only
+        // keeps the camera from sinking into the ground.
         return;
     }
     if (signedHeight >= clearance) return;
@@ -573,6 +653,34 @@ function _enforceLandingSurfaceClearance(body) {
     }
 }
 
+const _clipPrevPosition = new THREE.Vector3;
+let _clipPrevValid = false;
+const _clipSweepSegment = new THREE.Vector3;
+const _clipSweepOrigin = new THREE.Vector3;
+const _clipSweepEntry = new THREE.Vector3;
+const _clipSweepShift = new THREE.Vector3;
+
+function _sweepCameraSegment(center, expandedRadius) {
+    if (!_clipPrevValid) return false;
+    _clipSweepSegment.subVectors(camera.position, _clipPrevPosition);
+    const a = _clipSweepSegment.lengthSq();
+    if (a < 1e-24) return false;
+    _clipSweepOrigin.copy(_clipPrevPosition).sub(center);
+    const c = _clipSweepOrigin.lengthSq() - expandedRadius * expandedRadius;
+    if (c <= 0) return false;
+    const b = 2 * _clipSweepOrigin.dot(_clipSweepSegment);
+    const discriminant = b * b - 4 * a * c;
+    if (discriminant < 0) return false;
+    const t = (-b - Math.sqrt(discriminant)) / (2 * a);
+    if (t < 0 || t > 1) return false;
+    _clipSweepEntry.copy(_clipPrevPosition).addScaledVector(_clipSweepSegment, t);
+    _clipSweepShift.subVectors(_clipSweepEntry, camera.position);
+    camera.position.copy(_clipSweepEntry);
+    controls.target.add(_clipSweepShift);
+    zoomDistTarget = null;
+    return true;
+}
+
 function _checkBodyClearance(body, dt) {
     if (!body?.visible || !body.geometry || !body.geometry.parameters) return;
     if (body === landingState?.body || body === camTransition?.landing?.body) {
@@ -581,10 +689,13 @@ function _checkBodyClearance(body, dt) {
     }
     body.updateWorldMatrix(true, false);
     body.getWorldPosition(_collisionPos);
+    const bodyRadius = bodyWorldRadius(body);
+
+    const _stepPad = _clipPrevValid ? _clipSweepOrigin.subVectors(camera.position, _clipPrevPosition).length() * .001 : 0;
+    _sweepCameraSegment(_collisionPos, bodyRadius + cameraEyeHeightUnits(body) * 1.5 + _stepPad);
     _collisionOffset.copy(camera.position).sub(_collisionPos);
     const distance = _collisionOffset.length();
     if (distance < 1e-12) return;
-    const bodyRadius = bodyWorldRadius(body);
     if (distance > bodyRadius * 1.25) return;
     _collisionOffset.divideScalar(distance);
     if (_bodySurfaceHitWithFallback(body, _collisionPos, _collisionOffset, _cameraLandingHitPoint, _cameraLandingHitNormal)) {
@@ -607,10 +718,11 @@ function preventCameraClipping(dt) {
     const camPos = camera.position;
     const sunObj = objectRegistry["sun"];
     if (sunObj) {
-        const sunRadius = sunObj.geometry.parameters.radius;
+        const sunRadius = sunObj.userData?.radius || sunObj.geometry?.parameters?.radius || 0;
         const margin = 1.02;
         const sunMin = sunRadius * margin;
         sunObj.getWorldPosition(_collisionPos);
+        _sweepCameraSegment(_collisionPos, sunMin);
         _collisionOffset.subVectors(camPos, _collisionPos);
         const sunDist = _collisionOffset.length();
         if (sunDist < sunMin) {
@@ -631,6 +743,8 @@ function preventCameraClipping(dt) {
     if (objectRegistry["moon"]) {
         _checkBodyClearance(objectRegistry["moon"], dt);
     }
+    _clipPrevPosition.copy(camera.position);
+    _clipPrevValid = true;
 }
 
 function updateSurfaceGridControl(key) {
@@ -643,9 +757,16 @@ function updateSurfaceGridControl(key) {
     surfaceGridBtn.title = supported ? `Toggle the ${bodyFacts[key]?.name || key} equatorial surface grid.` : "Focus a supported planet or the Moon to use its surface grid.";
 }
 
+// Any solid body can be landed on: planets, moons and comet nuclei alike. A body
+// qualifies if it is in the registry under its own key and has a radius; the sun has no surface.
 function isLandableBody(body) {
+    if (!body || !body.visible) return false;
     const key = body?.userData?.planetKey;
-    return !!body && body.visible && [ "mercury", "venus", "earth", "mars", "jupiter", "saturn", "uranus", "neptune", "moon", "pluto" ].includes(key);
+    if (!key || key === "sun") return false;
+    if (objectRegistry[key] !== body) return false;
+    // Population anchors are invisible stand-ins for asteroid groups, not surfaces.
+    if (body.userData?.isPopulationAnchor) return false;
+    return (body.geometry?.parameters?.radius || body.userData?.focusRadius || 0) > 0;
 }
 
 function bodyWorldRadius(body) {
@@ -662,6 +783,24 @@ function cameraEyeHeightUnits(body) {
     return Math.max(physicalHeight * worldScale, bodyWorldRadius(body) * 2e-7, 1e-12);
 }
 
+const CAMERA_MIN_POLAR_ANGLE = 0;
+
+const CAMERA_MAX_POLAR_ANGLE = Math.PI;
+
+function relaxControlsPolarLimits() {
+    if (controls.minPolarAngle === 0 && controls.maxPolarAngle === Math.PI) return;
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI;
+}
+
+function restoreControlsPolarLimits() {
+
+    if (landingState || camTransition?.followBodyRotation) return;
+    if (controls.minPolarAngle === CAMERA_MIN_POLAR_ANGLE && controls.maxPolarAngle === CAMERA_MAX_POLAR_ANGLE) return;
+    controls.minPolarAngle = CAMERA_MIN_POLAR_ANGLE;
+    controls.maxPolarAngle = CAMERA_MAX_POLAR_ANGLE;
+}
+
 function setLandingState(body, upWorld) {
     if (!body || !body.visible) return false;
     body.updateWorldMatrix(true, false);
@@ -672,9 +811,16 @@ function setLandingState(body, upWorld) {
     if (!_bodySurfaceHitWithFallback(body, _cameraSurfaceCenter, _cameraLandingNormal, _cameraLandingHitPoint, _cameraLandingHitNormal)) return false;
     const clearance = cameraEyeHeightUnits(body);
     _cameraLandingPoint.copy(_cameraLandingHitPoint).addScaledVector(_cameraLandingHitNormal, clearance);
-    _cameraLandingPush.subVectors(_cameraLandingPoint, camera.position);
-    camera.position.copy(_cameraLandingPoint);
-    controls.target.add(_cameraLandingPush);
+
+    const signedHeight = _cameraLandingScratch.subVectors(camera.position, _cameraLandingHitPoint).dot(_cameraLandingHitNormal);
+    // The flight ends exactly at eye height, so there is nothing left to
+    // animate. A post-arrival "settle" was a second, independent motion the
+    // user saw as a stage after the landing; it is gone.
+    if (signedHeight < clearance) {
+        _cameraLandingPush.copy(_cameraLandingHitNormal).multiplyScalar(clearance - signedHeight);
+        camera.position.add(_cameraLandingPush);
+        controls.target.add(_cameraLandingPush);
+    }
     upWorld.copy(_cameraLandingHitNormal);
     body.worldToLocal(_cameraLandingPosition.copy(camera.position));
     body.worldToLocal(_cameraLandingStoredTarget.copy(controls.target));
@@ -683,16 +829,20 @@ function setLandingState(body, upWorld) {
     const surfaceNormalLocal = upWorld.clone().applyQuaternion(_cameraLandingQuaternion).normalize();
     landingState = {
         body: body,
+        settle: null,
         localPosition: _cameraLandingPosition.clone(),
         localTarget: _cameraLandingStoredTarget.clone(),
         localUp: upLocal,
         surfaceNormalLocal: surfaceNormalLocal,
         surfaceClearance: clearance,
-        previousMatrixWorld: body.matrixWorld.clone()
+        clearanceTarget: null,
+        clearanceAt: 0,
+        previousBodyPosition: _cameraSurfaceCenter.clone()
     };
     camera.up.copy(upWorld).normalize();
     controls.minDistance = 1e-8;
     controls.maxDistance = systemMaxDistance();
+    relaxControlsPolarLimits();
     return true;
 }
 
@@ -704,36 +854,56 @@ function updateLandingPose() {
         camera.up.copy(_cameraWorldUp);
         return;
     }
-    body.updateWorldMatrix(true, false);
-    const previousMatrix = landingState.previousMatrixWorld;
-    if (previousMatrix) {
-        _cameraLandingPrevInverse.copy(previousMatrix).invert();
-        _cameraLandingDeltaMatrix.copy(body.matrixWorld).multiply(_cameraLandingPrevInverse);
-        camera.position.applyMatrix4(_cameraLandingDeltaMatrix);
-        controls.target.applyMatrix4(_cameraLandingDeltaMatrix);
-        camera.up.transformDirection(_cameraLandingDeltaMatrix).normalize();
-        previousMatrix.copy(body.matrixWorld);
-        return;
+
+    body.getWorldPosition(_cameraSurfaceCenter);
+    const previous = landingState.previousBodyPosition || (landingState.previousBodyPosition = _cameraSurfaceCenter.clone());
+    _cameraLandingPush.subVectors(_cameraSurfaceCenter, previous);
+    if (_cameraLandingPush.lengthSq() > 0) {
+        camera.position.add(_cameraLandingPush);
+        controls.target.add(_cameraLandingPush);
     }
-    body.localToWorld(_cameraLandingPosition.copy(landingState.localPosition));
-    body.localToWorld(_cameraLandingStoredTarget.copy(landingState.localTarget));
-    body.getWorldQuaternion(_cameraLandingQuaternion);
-    camera.position.copy(_cameraLandingPosition);
-    controls.target.copy(_cameraLandingStoredTarget);
-    camera.up.copy(landingState.localUp).applyQuaternion(_cameraLandingQuaternion).normalize();
+    previous.copy(_cameraSurfaceCenter);
+
+    // Altitude control. The wheel (and the zoom keys) write surfaceClearance;
+    // this is the one place that turns it into a camera position, so the
+    // ground-level camera can climb and descend instead of being pinned.
+    const radius = bodyWorldRadius(body);
+    const eye = cameraEyeHeightUnits(body);
+    // Climb and descend glide: the wheel writes a target, this eases toward it, so
+    // a fast flick cannot teleport the camera up or down the atmosphere.
+    if (landingState.clearanceTarget != null) {
+        const now = performance.now();
+        const step = Math.min(.25, Math.max(0, (now - (landingState.clearanceAt || now)) / 1000));
+        landingState.clearanceAt = now;
+        const current = Math.max(eye, landingState.surfaceClearance || eye);
+        const target = Math.max(eye, landingState.clearanceTarget);
+        const eased = current + (target - current) * (1 - Math.exp(-LANDING_CLEARANCE_RATE * step));
+        landingState.surfaceClearance = Math.abs(target - eased) < target * 1e-4 ? target : eased;
+        if (landingState.surfaceClearance === target) landingState.clearanceTarget = null;
+    }
+    const clearance = Math.max(eye, landingState.surfaceClearance || eye);
+    _cameraLandingNormal.subVectors(camera.position, _cameraSurfaceCenter);
+    if (_cameraLandingNormal.lengthSq() > 1e-18) {
+        _cameraLandingNormal.normalize();
+        if (_bodySurfaceHitWithFallback(body, _cameraSurfaceCenter, _cameraLandingNormal, _cameraLandingHitPoint, _cameraLandingHitNormal)) {
+            _cameraLandingPoint.copy(_cameraLandingHitPoint).addScaledVector(_cameraLandingHitNormal, clearance);
+            _cameraLandingScratch.subVectors(_cameraLandingPoint, camera.position);
+            camera.position.add(_cameraLandingScratch);
+            controls.target.add(_cameraLandingScratch);
+        }
+    }
+    // Zooming out far enough hands the camera back to normal orbiting. No
+    // Escape, no mode switch: the position is continuous, so it just flies.
+    if (clearance >= radius * SURFACE_RELEASE_RATIO) {
+        landingState = null;
+        detachCameraFromFocus();
+        restoreControlsPolarLimits();
+    }
 }
 
 function captureLandingPose() {
-    if (!landingState || !landingState.body?.visible) return;
-    const body = landingState.body;
-    body.updateWorldMatrix(true, false);
-    body.worldToLocal(_cameraLandingPosition.copy(camera.position));
-    body.worldToLocal(_cameraLandingStoredTarget.copy(controls.target));
-    body.getWorldQuaternion(_cameraLandingQuaternion).invert();
-    landingState.localPosition.copy(_cameraLandingPosition);
-    landingState.localTarget.copy(_cameraLandingStoredTarget);
-    landingState.localUp.copy(camera.up).applyQuaternion(_cameraLandingQuaternion).normalize();
-    landingState.previousMatrixWorld?.copy(body.matrixWorld);
+
+    return;
 }
 
 function landOnFocusedPlanet(options = {}) {
@@ -742,6 +912,8 @@ function landOnFocusedPlanet(options = {}) {
     _autoLandingIntentAt = 0;
     let body = isLandableBody(focusedObject) ? focusedObject : null;
     if (!body && isLandableBody(lastFocusedObject)) body = lastFocusedObject;
+
+    if (!body) body = nearbyLandableBody(2.5);
     if (!body || !solarAccuracy.available) return false;
     if (body !== focusedObject) focusOnObject(body);
     if (landingState?.body === body || camTransition?.landing?.body === body) return true;
@@ -803,6 +975,9 @@ function landOnFocusedPlanet(options = {}) {
         fromUp: fromUp,
         toUp: upWorld.clone(),
         toUpLocal: upLocal.clone(),
+        // One straight line from where the camera is to the landing point:
+        // no arc bow, no mid-flight ease change.
+        straight: true,
         followBodyRotation: true,
         transitionBody: body,
         toTargetLocal: toTargetLocal,
@@ -818,7 +993,7 @@ function landOnFocusedPlanet(options = {}) {
             fromCamLocal: fromCamLocal,
             fromTargetLocal: fromTargetLocal,
             approachDistance: approachDistance,
-            approachSplit: LANDING_APPROACH_SPLIT,
+            approachSplit: APPROACH_SPLIT,
             terrainReady: !terrainPreparationRequired
         }
     };
@@ -834,17 +1009,35 @@ function landOnFocusedPlanet(options = {}) {
     return true;
 }
 
+function nearbyLandableBody(maxRatio = 1.6) {
+
+    let best = null, bestGap = Infinity;
+    for (const candidate of Object.values(objectRegistry)) {
+        if (!isLandableBody(candidate)) continue;
+        candidate.getWorldPosition(_cameraSurfaceCenter);
+        const radius = Math.max(bodyWorldRadius(candidate), 1e-9);
+        const gap = camera.position.distanceTo(_cameraSurfaceCenter) / radius;
+        if (gap <= maxRatio && gap < bestGap) {
+            bestGap = gap;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
 function leavePlanetLanding() {
     cameraKeys.clear();
     _autoLandingIntentAt = 0;
-    if (!landingState && !camTransition?.landing) return false;
     if (camTransition?.landing && !landingState) {
         camTransition = null;
         detachCameraFromFocus();
         controls.update();
         return true;
     }
-    const body = landingState.body;
+    const body = landingState?.body || nearbyLandableBody();
+    if (!body) return false;
+
+    endRightOrbit();
     const fromUp = camera.up.clone();
     landingState = null;
     if (!body?.visible) return true;
@@ -864,22 +1057,33 @@ function leavePlanetLanding() {
     const bodyQuaternionInverse = bodyQuaternionStart.clone().invert();
     const toTargetLocal = toTarget.clone().sub(_cameraSurfaceCenter).applyQuaternion(bodyQuaternionInverse);
     const toCamLocal = toCam.clone().sub(_cameraSurfaceCenter).applyQuaternion(bodyQuaternionInverse);
+
+    const fromCamLocal = fromCam.clone().sub(_cameraSurfaceCenter).applyQuaternion(bodyQuaternionInverse);
+    const fromTargetLocal = fromTarget.clone().sub(_cameraSurfaceCenter).applyQuaternion(bodyQuaternionInverse);
+    // frame-loop reads toUpLocal for every body-locked transition; this path
+    // never set it, so _ctUpNow.copy(undefined) threw once per frame for the
+    // whole flight and left the landing half-applied.
+    const toUpLocal = _cameraLandingNormal.clone().applyQuaternion(bodyQuaternionInverse);
     controls.minDistance = 1e-8;
     controls.maxDistance = systemMaxDistance();
     zoomDistTarget = null;
     camTransition = {
         t: 0,
-        duration: cinematicFocusDuration(fromCam, toCam),
+        duration: Math.max(3.4, cinematicFocusDuration(fromCam, toCam)),
         endMaxDistance: systemMaxDistance(),
         restoreWorldUp: true,
+        straight: true,
         fromTarget: fromTarget,
         fromCam: fromCam,
         fromUp: fromUp,
         toUp: _cameraWorldUp.clone(),
         followBodyRotation: true,
         transitionBody: body,
+        toUpLocal: toUpLocal,
         toTargetLocal: toTargetLocal,
         toCamLocal: toCamLocal,
+        fromCamLocal: fromCamLocal,
+        fromTargetLocal: fromTargetLocal,
         planetStart: _cameraSurfaceCenter.clone(),
         toTargetBase: toTarget,
         toCamBase: toCam
@@ -890,6 +1094,8 @@ function leavePlanetLanding() {
 
 function updateCameraOrbitTarget() {
     if (!rightOrbitActive || !rightOrbitObject) return;
+    // While landed the target is the walking aim point, not the body centre.
+    if (landingState) return;
     if (!rightOrbitObject.visible) {
         rightOrbitObject = null;
         return;
@@ -900,12 +1106,13 @@ function updateCameraOrbitTarget() {
 function beginRightOrbit() {
     if (_cameraLookDrag) return;
     _autoLandingIntentAt = 0;
+
     cameraKeys.clear();
     controls.autoRotate = false;
     if (toggleRotateBtn) toggleRotateBtn.classList.remove("active");
     camTransition = null;
     zoomDistTarget = null;
-    landingState = null;
+
     controls.maxDistance = Math.max(controls.maxDistance, systemMaxDistance());
     rightOrbitObject = null;
     camera.updateMatrixWorld(true);
@@ -914,7 +1121,8 @@ function beginRightOrbit() {
     if (_cameraLandingScratch.dot(_cameraForward) <= 1e-10) {
         controls.target.copy(camera.position).addScaledVector(_cameraForward, Math.max(_cameraLandingScratch.length(), .001));
     }
-    const orbitCandidate = focusedObject?.visible ? focusedObject : lastFocusedObject?.visible ? lastFocusedObject : null;
+
+    const orbitCandidate = focusedObject?.visible ? focusedObject : null;
     if (orbitCandidate && orbitCandidate !== solarSystem) {
         orbitCandidate.getWorldPosition(_cameraSurfaceCenter);
         const tolerance = Math.max(bodyWorldRadius(orbitCandidate) * .001, 1e-8);
@@ -937,15 +1145,21 @@ function endRightOrbit() {
     distanceReadout?.noteInput();
 }
 
-function beginManualCameraMotion() {
+function beginManualCameraMotion(releaseFocus = false) {
     _autoLandingIntentAt = 0;
-    detachCameraFromFocus();
+    if (landingState?.settle) landingState.settle = null;
+
+    const landingInProgress = !!camTransition?.landing && !landingState;
+    if (!landingInProgress) {
+
+        if (releaseFocus) releaseFocusForManualMotion(); else detachCameraFromFocus();
+        camTransition = null;
+    }
     controls.autoRotate = false;
     resetCameraControlMomentum();
     if (toggleRotateBtn) toggleRotateBtn.classList.remove("active");
     if (rightOrbitActive) endRightOrbit();
     zoomDistTarget = null;
-    camTransition = null;
     distanceReadout?.noteInput();
 }
 
@@ -958,6 +1172,9 @@ function wireCameraInput() {
             if (event.pointerType === "mouse" && event.button === 2) {
                 _cameraRightPointer = event.pointerId;
                 beginRightOrbit();
+                _cameraRightDrag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+            } else if (event.pointerType !== "mouse") {
+                releaseFocusForManualMotion();
             }
             return;
         }
@@ -967,8 +1184,9 @@ function wireCameraInput() {
         camera.updateMatrixWorld(true);
         const aimDistance = camera.position.distanceTo(controls.target);
         freeAimDistance = THREE.MathUtils.clamp(Number.isFinite(aimDistance) ? aimDistance : 36, 1e-8, systemMaxDistance());
-        camera.getWorldDirection(_cameraForward);
-        controls.target.copy(camera.position).addScaledVector(_cameraForward, freeAimDistance);
+        // The target is re-based on the first real movement, not here: re-aiming
+        // on a plain click moved the orbit centre and nudged the view forward
+        // every time the user clicked near a comet.
         _cameraLookDrag = {
             id: event.pointerId,
             x: event.clientX,
@@ -982,6 +1200,18 @@ function wireCameraInput() {
         } catch (_) {}
     }, true);
     document.addEventListener("pointermove", event => {
+        if (_cameraRightDrag && _cameraRightDrag.id === event.pointerId) {
+            const dragX = event.clientX - _cameraRightDrag.x;
+            const dragY = event.clientY - _cameraRightDrag.y;
+            _cameraRightDrag.x = event.clientX;
+            _cameraRightDrag.y = event.clientY;
+            if (!_cameraRightDrag.moved && (dragX || dragY)) {
+                _cameraRightDrag.moved = true;
+                if (releaseFocusForManualMotion()) rightOrbitObject = null;
+            }
+            if (dragX || dragY) _orbitCameraByDrag(dragX, dragY);
+            event.preventDefault();
+        }
         if (!_cameraLookDrag || event.pointerId !== _cameraLookDrag.id) return;
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -990,10 +1220,17 @@ function wireCameraInput() {
         const dy = event.clientY - drag.y;
         drag.x = event.clientX;
         drag.y = event.clientY;
-        if ((event.clientX - drag.startX) ** 2 + (event.clientY - drag.startY) ** 2 > 36) drag.moved = true;
+        if ((event.clientX - drag.startX) ** 2 + (event.clientY - drag.startY) ** 2 > 36) {
+            if (!drag.moved) releaseFocusForManualMotion();
+            drag.moved = true;
+        }
         if (!dx && !dy) return;
         camera.updateMatrixWorld(true);
         camera.getWorldDirection(_cameraForward);
+        if (!drag.freeAim) {
+            drag.freeAim = true;
+            controls.target.copy(camera.position).addScaledVector(_cameraForward, freeAimDistance);
+        }
         _cameraUp.copy(camera.up).normalize();
         _cameraForward.applyAxisAngle(_cameraUp, -dx * .0032).normalize();
         const pitch = Math.asin(THREE.MathUtils.clamp(_cameraForward.dot(_cameraUp), -1, 1));
@@ -1019,6 +1256,7 @@ function wireCameraInput() {
         }
         if (_cameraRightPointer === event.pointerId) {
             _cameraRightPointer = null;
+            _cameraRightDrag = null;
             setTimeout(endRightOrbit, 0);
         }
     }, true);
@@ -1026,6 +1264,7 @@ function wireCameraInput() {
         if (_cameraLookDrag?.id === event.pointerId) _cameraLookDrag = null;
         if (_cameraRightPointer === event.pointerId) {
             _cameraRightPointer = null;
+            _cameraRightDrag = null;
             endRightOrbit();
         }
     }, true);
@@ -1033,10 +1272,10 @@ function wireCameraInput() {
         cameraKeys.clear();
         if (_cameraLookDrag) _cameraLookDrag = null;
         _cameraRightPointer = null;
+        _cameraRightDrag = null;
         endRightOrbit();
     });
 }
-
 
 function updateElevationSurfaceDetail() {
     if (!elevationCatalog) return;
@@ -1060,7 +1299,6 @@ function updateElevationSurfaceDetail() {
             ? atmosphereTopKm * (_surfacePerformanceMode ? 2.6 : 1.7)
             : radiusKm * (_surfacePerformanceMode ? .04 : .02);
         if (pinned || altitudeKm <= surfaceCutoffKm) inSurfaceRenderRange = true;
-
         if (elevationCatalog.hasMap(key) && !elevationCatalog.hasPreparedSurfaceDetail(key) && ratio < 1.32) {
             elevationCatalog.prepareSurfaceDetail(key).catch(() => {});
         }
@@ -1077,38 +1315,75 @@ function updateElevationSurfaceDetail() {
     setSurfacePerformanceMode(inSurfaceRenderRange);
 }
 
-function cameraFocusSpeedScale() {
-    const body = isLandableBody(focusedObject) ? focusedObject : null;
-    if (!body) return 1;
-    body.getWorldPosition(_cameraSurfaceCenter);
-    const radius = Math.max(bodyWorldRadius(body), 1e-9);
-    const gap = Math.max(0, camera.position.distanceTo(_cameraSurfaceCenter) - radius);
-    const proximity = THREE.MathUtils.smoothstep(gap / radius, 0, 8);
-    return .05 + .95 * proximity;
+// How fast the camera is allowed to move around the focused body, relative to
+// Earth. Big bodies get bigger steps, small moons much smaller ones: at the same
+// zoom a wheel notch over Phoebe should not throw the camera off the rock.
+// The exponent keeps the range usable - radius spans five orders of magnitude.
+function bodySizeSpeedScale(body = focusedObject) {
+    const radius = body && body !== solarSystem ? bodyWorldRadius(body) : 0;
+    const earth = objectRegistry?.earth ? bodyWorldRadius(objectRegistry.earth) : 0;
+    if (!(radius > 0) || !(earth > 0)) return 1;
+    return THREE.MathUtils.clamp(Math.pow(radius / earth, .35), .35, 1.8);
 }
 
-function cameraNavigationSpeed() {
-    if (landingState?.body?.visible) return km2u(CAMERA_WALK_SPEED_MPS / 1e3);
-    const body = isLandableBody(focusedObject) ? focusedObject : null;
-    if (!body) return CAMERA_MOVE_MAX_SPEED;
-    body.getWorldPosition(_cameraSurfaceCenter);
-    const radius = Math.max(bodyWorldRadius(body), 1e-9);
-    const gap = Math.max(0, camera.position.distanceTo(_cameraSurfaceCenter) - radius);
-    const key = body.userData?.planetKey;
-    const radiusKm = BodyShapes.maxRadiusKm(key);
-    const atmosphereTopKm = PLANET_ATMOSPHERE_PROFILES?.[key]?.derived?.topKm || 0;
-    const flightBlend = THREE.MathUtils.smoothstep(gap / radius, 10, 24);
-    const nearSpeed = km2u(CAMERA_NEAR_BODY_SPEED_MPS / 1e3);
-    const ordinarySpeed = nearSpeed + (CAMERA_MOVE_MAX_SPEED - nearSpeed) * flightBlend;
-    if (!(radiusKm > 0 && atmosphereTopKm > 0)) return ordinarySpeed;
-    const altitudeKm = gap / radius * radiusKm;
-    const atmosphereBlend = 1 - THREE.MathUtils.smoothstep(
-        altitudeKm,
-        atmosphereTopKm * 1.1,
-        atmosphereTopKm * 3
-    );
-    const atmosphereSpeed = km2u(CAMERA_ATMOSPHERE_SPEED_MPS / 1e3);
-    return THREE.MathUtils.lerp(ordinarySpeed, atmosphereSpeed, atmosphereBlend);
+function cameraFocusSpeedScale() {
+    return bodySizeSpeedScale();
+}
+
+const _atmoTrackPosition = new THREE.Vector3;
+const _atmoTrackScale = new THREE.Vector3;
+let atmosphereTrackKey = null;
+
+function cameraAtmosphereSpeedFactor() {
+    atmosphereTrackKey = null;
+    let factor = 1;
+    if (typeof PLANET_ATMOSPHERE_PROFILES === "undefined" || typeof cloudMeshes === "undefined") return 1;
+    for (const key in PLANET_ATMOSPHERE_PROFILES) {
+        const shell = cloudMeshes[key + "_atmosphere"];
+        const body = objectRegistry[key];
+        if (!shell || !body?.geometry?.parameters) continue;
+        body.getWorldPosition(_atmoTrackPosition);
+        const bodyR = bodyWorldRadius(body);
+        body.getWorldScale(_atmoTrackScale);
+        const worldScale = Math.max(Math.abs(_atmoTrackScale.x), Math.abs(_atmoTrackScale.y), Math.abs(_atmoTrackScale.z), 1e-12);
+        const shellR = (shell.geometry?.parameters?.radius || body.geometry.parameters.radius) * worldScale;
+        if (!(shellR > bodyR)) continue;
+        const distance = camera.position.distanceTo(_atmoTrackPosition);
+        if (distance >= shellR || distance <= bodyR * .5) continue;
+        const depth = THREE.MathUtils.clamp((distance - bodyR) / (shellR - bodyR), 0, 1);
+        // Squared ramp: keeps the old feel high up, drops to 6% at the surface so a
+        // drag turns the view instead of throwing it over the horizon.
+        const bodyFactor = .06 + .94 * depth * depth;
+        if (bodyFactor < factor) {
+            factor = bodyFactor;
+            atmosphereTrackKey = key;
+        }
+    }
+    return factor;
+}
+
+globalThis.cameraAtmosphereSpeedFactor = cameraAtmosphereSpeedFactor;
+globalThis.cameraAtmosphereKey = () => atmosphereTrackKey;
+
+const _navBodyCenter = new THREE.Vector3;
+
+// The step a key press should take right now. Close to a body the tuned orbital
+// speed is meaningless - on a 1.7 km nucleus it crosses the whole rock in a few
+// microseconds - so the local ceiling follows the body's radius and the camera's
+// height above it. Far away it returns Infinity and the old speed stands.
+function cameraLocalSpeedCeiling(body = focusedObject) {
+    if (!body || body === solarSystem) return Infinity;
+    const radius = bodyWorldRadius(body);
+    if (!(radius > 0)) return Infinity;
+    body.getWorldPosition(_navBodyCenter);
+    const altitude = Math.max(0, camera.position.distanceTo(_navBodyCenter) - radius);
+    if (altitude > radius * 60) return Infinity;
+    const surface = Math.min(km2u(CAMERA_NEAR_BODY_SPEED_MPS / 1000), radius * CAMERA_SURFACE_SPEED_RADII);
+    return Math.max(surface, altitude * CAMERA_ALTITUDE_SPEED_RATE);
+}
+
+function cameraNavigationSpeed(body = focusedObject) {
+    return Math.min(CAMERA_MOVE_MAX_SPEED * bodySizeSpeedScale(body), cameraLocalSpeedCeiling(body));
 }
 
 function noteAutomaticLandingIntent() {
@@ -1171,60 +1446,32 @@ function _walkLandedSurface(body, movement) {
 
 function updateCameraNavigation(dt) {
     if (!cameraKeys.size || !(dt > 0)) return;
+    if (landingState?.settle) landingState.settle = null;
     if (camTransition?.landing && !landingState) return;
     camera.updateMatrixWorld(true);
     camera.getWorldDirection(_cameraForward);
     _cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
     const strafe = (cameraKeys.has("d") ? 1 : 0) - (cameraKeys.has("a") ? 1 : 0);
     const dolly = (cameraKeys.has("w") ? 1 : 0) - (cameraKeys.has("s") ? 1 : 0);
-    if (landingState?.body?.visible) {
-        const body = landingState.body;
-        body.getWorldPosition(_cameraSurfaceCenter);
-        _cameraLandingNormal.subVectors(camera.position, _cameraSurfaceCenter).normalize();
-        if (_bodySurfaceHitWithFallback(body, _cameraSurfaceCenter, _cameraLandingNormal, _cameraLandingHitPoint, _cameraLandingHitNormal)) {
-            _cameraLandingNormal.copy(_cameraLandingHitNormal);
-        }
-        _cameraForward.addScaledVector(_cameraLandingNormal, -_cameraForward.dot(_cameraLandingNormal));
-        _cameraRight.addScaledVector(_cameraLandingNormal, -_cameraRight.dot(_cameraLandingNormal));
-        if (_cameraForward.lengthSq() < 1e-10) _cameraForward.crossVectors(_cameraRight, _cameraLandingNormal);
-        if (_cameraRight.lengthSq() < 1e-10) _cameraRight.crossVectors(_cameraLandingNormal, _cameraForward);
-        _cameraForward.normalize();
-        _cameraRight.normalize();
-        _cameraMove.set(0, 0, 0);
-        if (cameraKeys.has("w")) _cameraMove.add(_cameraForward);
-        if (cameraKeys.has("s")) _cameraMove.sub(_cameraForward);
-        if (strafe > 0) _cameraMove.add(_cameraRight);
-        if (strafe < 0) _cameraMove.sub(_cameraRight);
-        if (_cameraMove.lengthSq() > 0) {
-            _cameraMove.normalize().multiplyScalar(cameraNavigationSpeed() * dt);
-            _walkLandedSurface(body, _cameraMove);
-        }
-    } else {
-        if (dolly) {
-            const currentDistance = zoomDistTarget ?? camera.position.distanceTo(controls.target);
-            const speedScale = Math.max(.25, cameraFocusSpeedScale());
-            zoomDistTarget = THREE.MathUtils.clamp(
-                currentDistance * Math.exp(-dolly * CAMERA_KEYBOARD_DOLLY_RATE * speedScale * dt),
-                controls.minDistance,
-                controls.maxDistance
-            );
-        }
-        if (strafe) {
-            const cameraDistance = camera.position.distanceTo(controls.target);
-            const body = isLandableBody(focusedObject) ? focusedObject : null;
-            let nearBodyPanScale = 1;
-            if (body) {
-                body.getWorldPosition(_cameraSurfaceCenter);
-                const radius = Math.max(bodyWorldRadius(body), 1e-9);
-                const gap = Math.max(0, camera.position.distanceTo(_cameraSurfaceCenter) - radius);
-                const clearanceBlend = THREE.MathUtils.smoothstep(gap / radius, 0, 8);
-                nearBodyPanScale = .12 + .88 * clearanceBlend;
-            }
-            const panSpeed = Math.max(cameraNavigationSpeed(), cameraDistance * CAMERA_KEYBOARD_PAN_RATE * nearBodyPanScale);
-            _cameraMove.copy(_cameraRight).multiplyScalar(strafe * panSpeed * dt);
-            camera.position.add(_cameraMove);
-            controls.target.add(_cameraMove);
-        }
+    const atmosphereFactor = cameraAtmosphereSpeedFactor();
+    const sizeFactor = bodySizeSpeedScale();
+    const speedCeiling = cameraLocalSpeedCeiling();
+    if (dolly) {
+        zoomDistTarget = null;
+        const moveSpeed = Math.min(speedCeiling, Math.max(
+            cameraNavigationSpeed(),
+            camera.position.distanceTo(controls.target) * CAMERA_KEYBOARD_MOVE_RATE * sizeFactor
+        ));
+        _cameraMove.copy(_cameraForward).multiplyScalar(dolly * moveSpeed * atmosphereFactor * dt);
+        camera.position.add(_cameraMove);
+        controls.target.add(_cameraMove);
+    }
+    if (strafe) {
+        const cameraDistance = camera.position.distanceTo(controls.target);
+        const panSpeed = Math.min(speedCeiling, Math.max(cameraNavigationSpeed(), cameraDistance * CAMERA_KEYBOARD_MOVE_RATE * sizeFactor));
+        _cameraMove.copy(_cameraRight).multiplyScalar(strafe * panSpeed * atmosphereFactor * dt);
+        camera.position.add(_cameraMove);
+        controls.target.add(_cameraMove);
     }
     const roll = (cameraKeys.has("e") ? 1 : 0) - (cameraKeys.has("q") ? 1 : 0);
     if (roll) {
@@ -1276,8 +1523,16 @@ function rebaseFloatingOrigin() {
         }
     }
     solarSystem.updateMatrixWorld(true);
-    landingState?.body?.updateWorldMatrix(true, false);
-    landingState?.previousMatrixWorld?.copy(landingState.body.matrixWorld);
+
+    landingState?.previousBodyPosition?.sub(_cameraOffset);
+
+    if (landingState?.settle) {
+        landingState.settle.fromPos.sub(_cameraOffset);
+        landingState.settle.toPos.sub(_cameraOffset);
+        landingState.settle.fromTarget.sub(_cameraOffset);
+        landingState.settle.toTarget.sub(_cameraOffset);
+    }
+    if (_clipPrevValid) _clipPrevPosition.sub(_cameraOffset);
     camera.updateMatrixWorld(true);
     _cullMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     _cullFrustum.setFromProjectionMatrix(_cullMat);

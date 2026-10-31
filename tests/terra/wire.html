@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><script type="importmap">
+{
+  "imports": {
+    "three": "../../vendor/three-r186/three.module.js",
+    "three/addons/": "../../vendor/three-r186/addons/"
+  }
+}
+</script>
+<title>Solister - terra bake wiring</title></head>
+<body>
+<script type="module">
+import "../../src/app/three-runtime.js";
+await new Promise((resolve, reject) => { const s=document.createElement("script"); s.src="../../src/render/terra-bake.js"; s.onload=resolve; s.onerror=reject; document.head.appendChild(s); });
+// Checks the two things queueTerraBakes() promises the app:
+//   1. a body still showing its procedural fallback gets the baked map,
+//   2. a body whose map came from a supplied ktx2 file is left alone.
+const canvas = document.createElement("canvas");
+canvas.width = 64; canvas.height = 64;
+const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: false });
+
+const fallback = new THREE.CanvasTexture(document.createElement("canvas"));
+const supplied = new THREE.CanvasTexture(document.createElement("canvas"));
+supplied.userData = { surfaceResolution: "2048" };
+
+const registry = {
+    mars: { material: new THREE.MeshStandardMaterial({ map: fallback }), userData: {} },
+    venus: { material: new THREE.MeshStandardMaterial({ map: supplied }), userData: {} },
+    earth: { material: new THREE.MeshStandardMaterial({ map: supplied }), userData: {} }
+};
+
+queueTerraBakes(renderer, [ "mars", "venus", "mercury", "moon" ], { registry: registry, width: 128 });
+
+setTimeout(() => {
+    const marsMap = registry.mars.material.map;
+    const result = {
+        marsBaked: marsMap?.userData?.surfaceSource === "terra-bake",
+        marsReplacedFallback: marsMap !== fallback,
+        venusUntouched: registry.venus.material.map === supplied,
+        earthUntouched: registry.earth.material.map === supplied,
+        marsName: marsMap?.name || null,
+        marsColorSpace: marsMap?.colorSpace || null,
+        // no profile for a body means it must not be baked at all
+        unknownSkipped: !globalThis.TERRA_PROFILES.jupiter
+    };
+    result.pass = result.marsBaked && result.marsReplacedFallback && result.venusUntouched
+        && result.earthUntouched && result.unknownSkipped;
+    window.__wireResult = result;
+    window.__wireDone = true;
+}, 4000);
+</script>
+</body>
+</html>

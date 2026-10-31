@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e10 — sky-maps materials GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e10 sky-maps starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createSkyMilkyWay, createSkyGrid } from "../src/sky/sky-maps.tsl.js";
+import { MILKYWAY_GLSL, createMilkyWayUniforms } from "../src/sky/procedural-milkyway.js";
+import { OBLIQUITY_RADIANS, eqUnitToScene, galacticBasis, galacticFrame } from "../src/sky/sky-frame.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LineBasicNodeMaterial,
+  LineSegments as NodeLineSegments,
+  DoubleSide as NodeDoubleSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  AdditiveBlending as NodeAdditiveBlending,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// The sky-maps materials: the Milky Way shell (SKY_VERT pinning clip
+// z to the far plane, SKY_MILKYWAY_FRAGMENT = the procedural band
+// times uOpacity over the equirect unit sphere) and the coordinate
+// grid lines (standard transform, fragment discarding the behind-eye
+// hemisphere via the interpolated view z) against their extracted
+// production assemblies. Geometry is production's own builders,
+// copied verbatim; the dome radius is the production 8e6 scaled to
+// 100 (uniform scale does not change directions, and the band is a
+// pure function of direction).
+// Cases:
+//   0 milky way toward the galactic centre (bulge, lane, rift)
+//   1 milky way toward Cygnus (mid-longitude band)
+//   2 milky way with uOpacity 0.35 and uDust 0 (uniform paths)
+//   3 celestial grid alone (production colour, opacity 0.5)
+//   4 galactic grid toward the galactic pole (meridian crowding)
+//   5 milky way + celestial grid (renderOrders -2100, -1800)
+const NEAR = 0.1;
+const FAR = 5000;
+const R = 100;
+
+function sceneDirOf(raDeg, decDeg) {
+  const a = raDeg * Math.PI / 180, d = decDeg * Math.PI / 180;
+  const eq = { x: Math.cos(d) * Math.cos(a), y: Math.cos(d) * Math.sin(a), z: Math.sin(d) };
+  const out = { x: 0, y: 0, z: 0, set(x, y, z) { this.x = x; this.y = y; this.z = z; return this; } };
+  eqUnitToScene(eq, out);
+  return [out.x * 10, out.y * 10, out.z * 10];
+}
+
+const LOOK_GC = sceneDirOf(266.405, -28.936);
+const LOOK_CYG = sceneDirOf(305.0, 40.0);
+const LOOK_NGP = sceneDirOf(192.859, 27.128);
+
+const CASES = [
+  { kind: "mw-centre", look: LOOK_GC, mw: { opacity: 1.0, dust: 1.0 } },
+  { kind: "mw-cygnus", look: LOOK_CYG, mw: { opacity: 1.0, dust: 1.0 } },
+  { kind: "mw-nodust", look: LOOK_GC, mw: { opacity: 0.35, dust: 0.0 } },
+  { kind: "grid-celestial", look: LOOK_GC, grid: { frame: "equatorial", hex: 14411508, everyL: 30, everyB: 30 } },
+  { kind: "grid-galactic", look: LOOK_NGP, grid: { frame: "galactic", hex: 13681650, everyL: 15, everyB: 15 } },
+  { kind: "mw-grid", look: LOOK_GC, mw: { opacity: 1.0, dust: 1.0 }, grid: { frame: "equatorial", hex: 14411508, everyL: 30, everyB: 30 } }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5sky = { done: false, error: null };
+
+async function loadProduction() {
+  const text = await fetch("../src/sky/sky-maps.js").then(r => {
+    if (!r.ok) throw new Error("sky-maps.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalOf = (marker, from = 0, evaluate) => {
+    const at = text.indexOf(marker, from);
+    if (at < 0) throw new Error("marker not found: " + marker);
+    // SKY_MILKYWAY_FRAGMENT contains a ${MILKYWAY_GLSL} hole but no
+    // nested backticks, so the next backtick closes it.
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return evaluate(text.slice(tick, end + 1));
+  };
+  const plain = lit => Function("return " + lit)();
+  const skyVert = literalOf("const SKY_VERT =", 0, plain);
+  const mwFragment = literalOf("const SKY_MILKYWAY_FRAGMENT =", 0,
+    lit => Function("MILKYWAY_GLSL", "return " + lit)(MILKYWAY_GLSL));
+  const gridAt = text.indexOf("const addGridLayer");
+  if (gridAt < 0) throw new Error("addGridLayer not found");
+  const gridVert = literalOf("vertexShader:", gridAt, plain);
+  const gridFragment = literalOf("fragmentShader:", gridAt, plain);
+  if (!skyVert.includes("gl_Position.z = gl_Position.w") ||
+      !mwFragment.includes("milkyWayBand(vSkyDirection)") ||
+      !mwFragment.includes("bandTransmittance") ||
+      !gridFragment.includes("if(vViewZ>=0.0) discard")) {
+    throw new Error("extracted sky-maps shaders do not look like production");
+  }
+  return { skyVert, mwFragment, gridVert, gridFragment };
+}
+
+// --- production geometry builders, verbatim (src/sky/sky-maps.js) -------
+function coordinateToScene(T, longitude, latitude, frame, out) {
+  const lon = longitude * Math.PI / 180;
+  const lat = latitude * Math.PI / 180;
+  const cb = Math.cos(lat);
+  const eq = new T.Vector3(cb * Math.cos(lon), cb * Math.sin(lon), Math.sin(lat));
+  if (frame === "ecliptic") {
+    const ce = Math.cos(OBLIQUITY_RADIANS);
+    const se = Math.sin(OBLIQUITY_RADIANS);
+    return out.set(eq.x, -eq.y * se + eq.z * ce, -(eq.y * ce + eq.z * se));
+  }
+  if (frame === "galactic") {
+    const b = galacticBasis();
+    eq.set(
+      b.x[0] * eq.x + b.y[0] * eq.y + b.z[0] * eq.z,
+      b.x[1] * eq.x + b.y[1] * eq.y + b.z[1] * eq.z,
+      b.x[2] * eq.x + b.y[2] * eq.y + b.z[2] * eq.z
+    );
+  }
+  return eqUnitToScene(eq, out);
+}
+
+function buildEquirectSphere(T) {
+  const segL = 360, segB = 180;
+  const positions = [], uvs = [], indices = [];
+  const t = new T.Vector3();
+  for (let j = 0; j <= segB; j++) {
+    for (let i = 0; i <= segL; i++) {
+      const u = i / segL, v = j / segB;
+      coordinateToScene(T, u * 360, 90 - v * 180, "equatorial", t);
+      positions.push(t.x, t.y, t.z);
+      uvs.push(u, 1 - v);
+    }
+  }
+  for (let j = 0; j < segB; j++) {
+    for (let i = 0; i < segL; i++) {
+      const a = j * (segL + 1) + i, b = a + 1, c = a + segL + 1, d = c + 1;
+      indices.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new T.BufferGeometry();
+  geo.setAttribute("position", new T.BufferAttribute(new Float32Array(positions), 3));
+  geo.setAttribute("uv", new T.BufferAttribute(new Float32Array(uvs), 2));
+  geo.setIndex(indices);
+  return geo;
+}
+
+function buildCoordinateGrid(T, frame, everyLongitude, everyLatitude) {
+  const positions = [];
+  const a = new T.Vector3();
+  const b = new T.Vector3();
+  const add = (lon0, lat0, lon1, lat1) => {
+    coordinateToScene(T, lon0, lat0, frame, a);
+    coordinateToScene(T, lon1, lat1, frame, b);
+    positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  };
+  for (let lon = 0; lon < 360; lon += everyLongitude) {
+    for (let lat = -90; lat < 90; lat += 2) add(lon, lat, lon, lat + 2);
+  }
+  for (let lat = -90 + everyLatitude; lat < 90; lat += everyLatitude) {
+    for (let lon = 0; lon < 360; lon += 2) add(lon, lat, lon + 2, lat);
+  }
+  const geo = new T.BufferGeometry();
+  geo.setAttribute("position", new T.BufferAttribute(new Float32Array(positions), 3));
+  return geo;
+}
+
+function makeCamera(isNode) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, NEAR, FAR);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(cfg.look[0], cfg.look[1], cfg.look[2]);
+  return camera;
+}
+
+function buildGlslScene(prod) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(false);
+  scene.add(camera);
+  if (cfg.mw) {
+    const material = new THREE.ShaderMaterial({
+      name: "P5e10 milkyway GLSL",
+      uniforms: (() => {
+        const u = createMilkyWayUniforms(THREE);
+        u.uDust.value = cfg.mw.dust;
+        u.uOpacity = { value: cfg.mw.opacity };
+        return u;
+      })(),
+      vertexShader: prod.skyVert,
+      fragmentShader: prod.mwFragment,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      depthTest: true,
+      toneMapped: false,
+      fog: false
+    });
+    const mesh = new THREE.Mesh(buildEquirectSphere(THREE), material);
+    mesh.scale.setScalar(R);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -2100;
+    scene.add(mesh);
+  }
+  if (cfg.grid) {
+    const material = new THREE.ShaderMaterial({
+      name: "P5e10 grid GLSL",
+      uniforms: {
+        uColor: { value: new THREE.Color(cfg.grid.hex) },
+        uOpacity: { value: 0.5 }
+      },
+      vertexShader: prod.gridVert,
+      fragmentShader: prod.gridFragment,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: true,
+      toneMapped: false,
+      fog: false
+    });
+    const lines = new THREE.LineSegments(
+      buildCoordinateGrid(THREE, cfg.grid.frame, cfg.grid.everyL, cfg.grid.everyB), material);
+    lines.scale.setScalar(R);
+    lines.frustumCulled = false;
+    lines.renderOrder = -1800;
+    scene.add(lines);
+  }
+  return { scene, camera };
+}
+
+function buildTslScene() {
+  const scene = new NodeScene();
+  const camera = makeCamera(true);
+  scene.add(camera);
+  if (cfg.mw) {
+    const slots = createSkyMilkyWay({
+      opacity: cfg.mw.opacity,
+      toGalactic: galacticFrame(NodeNS),
+      rhoZero: 1.0,
+      dust: cfg.mw.dust
+    });
+    const material = new MeshBasicNodeMaterial({ name: "P5e10 milkyway TSL" });
+    material.side = NodeDoubleSide;
+    material.depthWrite = false;
+    material.depthTest = true;
+    material.toneMapped = false;
+    material.vertexNode = slots.vertexNode;
+    material.colorNode = slots.colorNode;
+    if (slots.depthNode) material.depthNode = slots.depthNode;
+    const mesh = new NodeMesh(buildEquirectSphere(NodeNS), material);
+    mesh.scale.setScalar(R);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -2100;
+    scene.add(mesh);
+  }
+  if (cfg.grid) {
+    const slots = createSkyGrid({ color: new NodeColor(cfg.grid.hex), opacity: 0.5 });
+    const material = new LineBasicNodeMaterial({ name: "P5e10 grid TSL" });
+    material.transparent = true;
+    material.depthWrite = false;
+    material.depthTest = true;
+    material.blending = NodeAdditiveBlending;
+    material.toneMapped = false;
+    material.vertexNode = slots.vertexNode;
+    material.colorNode = slots.colorNode;
+    if (slots.depthNode) material.depthNode = slots.depthNode;
+    const lines = new NodeLineSegments(
+      buildCoordinateGrid(NodeNS, cfg.grid.frame, cfg.grid.everyL, cfg.grid.everyB), material);
+    lines.scale.setScalar(R);
+    lines.frustumCulled = false;
+    lines.renderOrder = -1800;
+    scene.add(lines);
+  }
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProduction();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod) : buildTslScene();
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5sky = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e10 sky-maps ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5sky = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e10 sky-maps error: " + window.__p5sky.error;
+}
+</script>
+</body>
+</html>

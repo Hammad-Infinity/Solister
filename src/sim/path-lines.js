@@ -24,7 +24,7 @@ const LOD_LEVELS = [ {
     glowStrength: .55
 } ];
 
-const FADE_CURVE_POWER = .6;
+const FADE_CURVE_POWER = .8;
 
 const DYNAMIC_ATTRIBUTES = [ "position", "aEnd", "aFade" ];
 
@@ -60,7 +60,6 @@ export class PathLines {
         this.parentPoint = new T.Vector3;
         this.scale = new T.Vector3;
         this.eye = new T.Vector3;
-        this.projected = new T.Vector3;
         this.viewport = new T.Vector2;
         this.token = "";
         this.serial = 0;
@@ -149,16 +148,10 @@ export class PathLines {
                 },
                 strength: {
                     value: 1
-                },
-                bodyDisk: {
-                    value: new T.Vector3
-                },
-                parentDisk: {
-                    value: new T.Vector3(0, 0, -1e6)
                 }
             },
             vertexShader: `attribute vec3 aEnd;attribute vec2 aCorner;attribute float aFade;\n    uniform vec2 viewport;uniform float halfWidth;uniform float nearPlane;\n    varying float vSide;varying float vFade;${LDB_VERTEX_PARS}\n    void main(){vec4 a=modelViewMatrix*vec4(position,1.0);vec4 b=modelViewMatrix*vec4(aEnd,1.0);float cut=-nearPlane*1.01;\n     vSide=aCorner.y;vFade=aFade;\n     if(a.z>cut&&b.z>cut){gl_Position=vec4(2.0,2.0,2.0,1.0);vFade=0.0;return;}\n     if(a.z>cut)a=mix(a,b,clamp((cut-a.z)/(b.z-a.z),0.0,1.0));\n     if(b.z>cut)b=mix(b,a,clamp((cut-b.z)/(a.z-b.z),0.0,1.0));\n     a=projectionMatrix*a;b=projectionMatrix*b;\n     vec2 delta=(b.xy/b.w-a.xy/a.w)*viewport;vec2 normal=vec2(-delta.y,delta.x)/max(length(delta),0.0001);\n     vec4 p=mix(a,b,aCorner.x);p.xy+=normal*aCorner.y*halfWidth*2.0/max(viewport,vec2(1.0))*p.w;gl_Position=p;${LDB_VERTEX_TAIL}}`,
-            fragmentShader: `uniform vec3 tint;uniform vec3 bodyDisk;uniform vec3 parentDisk;uniform float strength;varying float vSide;varying float vFade;${LDB_FRAGMENT_PARS}\n    void main(){${LDB_FRAGMENT_HEAD}float outside=distance(gl_FragCoord.xy,bodyDisk.xy)-bodyDisk.z;\n     float mask=smoothstep(0.0,2.0,outside)*smoothstep(0.0,2.0,distance(gl_FragCoord.xy,parentDisk.xy)-parentDisk.z);float x=vSide*vSide;\n     float glow=0.38*exp(-3.2*x)+0.62*exp(-80.0*x);\n     float alpha=glow*clamp(vFade,0.0,1.0)*strength*mask;if(alpha<0.002)discard;\n     gl_FragColor=vec4(tint,min(alpha,0.95));}`
+            fragmentShader: `uniform vec3 tint;uniform float strength;varying float vSide;varying float vFade;${LDB_FRAGMENT_PARS}\n    void main(){${LDB_FRAGMENT_HEAD}float x=vSide*vSide;\n     float glow=0.38*exp(-3.2*x)+0.62*exp(-80.0*x);\n     float alpha=glow*clamp(vFade,0.0,1.0)*strength;if(alpha<0.002)discard;\n     gl_FragColor=vec4(tint,min(alpha,0.95));}`
         });
         const mesh = new T.Mesh(geometry, material);
         mesh.frustumCulled = true;
@@ -233,9 +226,35 @@ export class PathLines {
             az = bz;
             af = bf;
         }
-        for (let i = start; i <= endIndex; i++) {
-            if (lengths[i] <= tail) continue;
-            emit(points[i * 3], points[i * 3 + 1], points[i * 3 + 2], Math.pow(Math.min(1, (lengths[i] - tail) / span), FADE_CURVE_POWER));
+        const emitSample = i => {
+            emit(points[i * 3], points[i * 3 + 1], points[i * 3 + 2], Math.pow(Math.min(1, Math.max(0, (lengths[i] - tail) / span)), FADE_CURVE_POWER));
+        };
+        const sampleSegments = Math.max(0, endIndex - start + 1);
+        const sampleBudget = Math.max(1, maxSegments - 1);
+        if (sampleSegments <= sampleBudget) {
+            for (let i = start; i <= endIndex; i++) {
+                if (lengths[i] > tail) emitSample(i);
+            }
+        } else {
+            // Spend the fixed vertex budget over the whole requested arc.
+            // Selecting by accumulated path length (rather than taking the
+            // first N time samples) keeps eccentric periapsis passages from
+            // being chorded away and guarantees that the budget still reaches
+            // the current body position below.
+            let sampleIndex = start;
+            let lastSample = start - 1;
+            const firstLength = lengths[start];
+            const lastLength = lengths[endIndex];
+            for (let n = 0; n < sampleBudget; n++) {
+                if (n === sampleBudget - 1) sampleIndex = endIndex; else {
+                    const targetLength = firstLength + (lastLength - firstLength) * (sampleBudget === 1 ? 1 : n / (sampleBudget - 1));
+                    while (sampleIndex < endIndex && lengths[sampleIndex] < targetLength) sampleIndex++;
+                }
+                if (sampleIndex > lastSample && lengths[sampleIndex] > tail) {
+                    emitSample(sampleIndex);
+                    lastSample = sampleIndex;
+                }
+            }
         }
         if (Math.hypot(ax - head.x, ay - head.y, az - head.z) > 1e-12) emit(head.x, head.y, head.z, 1);
         const count = segmentCount * 6;
@@ -321,23 +340,7 @@ export class PathLines {
             if (!entry.mesh.visible) continue;
             this.activeTrailCount++;
             entry.mesh.position.copy(this.world);
-            body.getWorldPosition(this.projected);
-            this.projected.project(this.camera);
-            body.getWorldScale(this.scale);
-            const radius = (body.geometry?.parameters?.radius || 0) * Math.max(Math.abs(this.scale.x), Math.abs(this.scale.y), Math.abs(this.scale.z));
-            const radiusPixels = radius * this.camera.projectionMatrix.elements[5] * this.viewport.y / (2 * Math.max(-this.eye.z, this.camera.near));
             const uniforms = entry.mesh.material.uniforms;
-            uniforms.bodyDisk.value.set((this.projected.x * .5 + .5) * this.viewport.x, (this.projected.y * .5 + .5) * this.viewport.y, this.eye.z < 0 ? radiusPixels : 0);
-            uniforms.parentDisk.value.set(0, 0, -1e6);
-            if (parent) {
-                parent.getWorldPosition(this.parentPoint);
-                this.parentPoint.applyMatrix4(this.camera.matrixWorldInverse);
-                parent.getWorldScale(this.scale);
-                const parentRadius = (parent.geometry?.parameters?.radius || 0) * Math.max(Math.abs(this.scale.x), Math.abs(this.scale.y), Math.abs(this.scale.z));
-                parent.getWorldPosition(this.projected);
-                this.projected.project(this.camera);
-                if (this.parentPoint.z < 0) uniforms.parentDisk.value.set((this.projected.x * .5 + .5) * this.viewport.x, (this.projected.y * .5 + .5) * this.viewport.y, parentRadius * this.camera.projectionMatrix.elements[5] * this.viewport.y / (2 * Math.max(-this.parentPoint.z, this.camera.near)));
-            }
             uniforms.nearPlane.value = this.camera.near;
             uniforms.halfWidth.value = Math.max(2 * dpr, Math.min(9 * dpr, Math.sqrt(Math.max(0, orbitPixels) / dpr) * .28 * dpr)) * settings.width;
             uniforms.strength.value = settings.glow * this._currentGlow();

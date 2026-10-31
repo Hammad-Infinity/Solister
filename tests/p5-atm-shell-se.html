@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c13 — atmosphere SE shell fragment GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c13 atmosphere SE shell fragment starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createAtmosphereShellSE } from "../src/shaders/planet-atmosphere.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  DataTexture as NodeDataTexture,
+  RGBAFormat as NodeRGBAFormat,
+  UnsignedByteType as NodeUnsignedByteType,
+  LinearFilter as NodeLinearFilter,
+  ClampToEdgeWrapping as NodeClampToEdgeWrapping,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  Vector3 as NodeVector3,
+  Matrix3 as NodeMatrix3,
+  DoubleSide as NodeDoubleSide,
+  REVISION
+} from "three/webgpu";
+import { float, select, vec3, vec4 } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// One parameter set, fed to the assembled production SE fragment and
+// to the TSL factory alike. Scene units are the fragment's own (body
+// radius 1, uRgKm 6371). Cases: outside day (ground-difference active);
+// outside with the sun swung behind (mu<0 transmittance branch, Mie
+// fade shut); inside the shell (far-surface draw, ground difference
+// suppressed, inside-sky integral spliced in before the eclipse
+// term -- P5d3; the old replace anchor missed this fragment, so the
+// integral never ran here); outside with Eclipse visibility 0.55.
+const BASE = {
+  intensity: 1.6, bodyRadius: 1.0, shellRadius: 1.06, insideShell: 0,
+  axisScale: [1, 1, 1], sunDir: [0.52, 0.31, 0.80], sunIntensity: 26,
+  rgKm: 6371, rtNorm: 1.06, mieG: 0.76, mieFade: 0.08, lutGain: 2.6,
+  // Inside-sky set (ground radii), same values as the inside rig.
+  mieTint: [1, 0.97, 0.92],
+  betaR: [25, 55, 140], betaMS: [18, 17, 16], betaMX: [22, 21, 20],
+  HR: 0.01, HM: 0.003, skyGain: 0.05, eyeHeightR: 0.0022, skySamples: 32,
+  camPos: [0.45, 0.28, 2.28], camTarget: [0, 0, 0], eclipseFactor: ""
+};
+const CASES = [
+  { ...BASE },
+  { ...BASE, sunDir: [0.85, 0.10, -0.52] },
+  { ...BASE, insideShell: 1, sunDir: [-0.25, 0.55, 0.80],
+    camPos: [0.0, 0.0, 1.0022], camTarget: [1.8, 0.05, 1.1222] },
+  { ...BASE, eclipseFactor: "0.55" }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5shell = { done: false, error: null };
+
+async function loadProductionFragment() {
+  const text = await fetch("../src/shaders/planet-atmosphere.glsl.js").then(r => {
+    if (!r.ok) throw new Error("planet-atmosphere.glsl.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalOf = marker => {
+    const at = text.indexOf(marker);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return text.slice(tick, end + 1);
+  };
+  const helpers = Function("return " + literalOf("const ATMOSPHERE_SKY_HELPERS = "))();
+  const skyInside = Function("return " + literalOf("const ATMOSPHERE_SKY_INSIDE_GLSL = "))();
+  // Assemble exactly as createPlanetAtmosphere assembles the LUT (SE)
+  // material, including its eclipse placeholders (factor only; the
+  // Eclipse source stays empty as for a non-Earth body) and its
+  // inside-sky splice, production's own replacement verbatim. Since
+  // P5d3 it inserts before the eclipse term, so it must land in this
+  // fragment too (the old anchor missed: `alpha *= shellFade;`
+  // intervened) while the Eclipse multiply survives after it.
+  let fragment = Function(
+    "ATMOSPHERE_SKY_HELPERS", "LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD",
+    "return " + literalOf("const ATMOSPHERE_FRAGMENT_SE_GLSL = ")
+  )(helpers, "", "");
+  fragment = fragment
+    .replace("${eclipseFactor}", cfg.eclipseFactor ? `eclipseVisibility=${cfg.eclipseFactor};` : "")
+    .replace("${eclipseSource}", "")
+    .replace("    float eclipseVisibility = 1.0;", skyInside + "    float eclipseVisibility = 1.0;");
+  if (!fragment.includes("SKY_SAMPLES_MAX")) {
+    throw new Error("inside-sky splice did not land in the SE fragment");
+  }
+  if (!fragment.includes("atmTexture4D") ||
+      !fragment.includes("radiance *= eclipseVisibility;") ||
+      !fragment.includes("gl_FragColor = vec4(radiance, alpha);")) {
+    throw new Error("assembled fragment does not look like the production SE shell");
+  }
+  // Diagnostic encoding only: fold alpha into the visible channels so
+  // the frame comparison covers radiance AND alpha arithmetic. The
+  // TSL side applies the identical encoding to its struct output.
+  fragment = fragment.replace(
+    "gl_FragColor = vec4(radiance, alpha);",
+    "gl_FragColor = vec4(radiance * (0.35 + 0.65 * alpha) + vec3(0.0, 0.0, alpha * 0.35), 1.0);"
+  );
+  return fragment;
+}
+
+function tableBytes(kind) {
+  // Transmittance: smooth 256x64 gradient (u = mu mapping, v = height).
+  // Inscatter atlas: 256x2048 with slice structure (nu slices across,
+  // r slices down) so the manual bilinear in atmTexture4D is exercised,
+  // not just hardware filtering.
+  const [w, h] = kind === "trans" ? [256, 64] : [256, 2048];
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const u = x / (w - 1), v = y / (h - 1);
+    const i = (y * w + x) * 4;
+    if (kind === "trans") {
+      const base = Math.exp(-3.2 * (1 - v) * (1.15 - u));
+      data[i] = Math.min(255, 255 * Math.pow(base, 0.55));
+      data[i + 1] = Math.min(255, 255 * Math.pow(base, 0.8));
+      data[i + 2] = Math.min(255, 255 * Math.pow(base, 1.25));
+      data[i + 3] = 255;
+    } else {
+      const nuSlice = Math.floor(x / 32), muS = (x % 32) / 31;
+      const rSlice = Math.floor(y / 64), mu = (y % 64) / 63;
+      // Height falloff kept mild: the eye-side lookup must exceed the
+      // transmittance-attenuated surface lookup, or the production
+      // ground difference clamps the whole disc to black and the frame
+      // comparison proves nothing there.
+      const amp = (0.25 + 0.75 * muS) * (1 - 0.25 * (rSlice / 31)) * (0.4 + 0.6 * mu);
+      data[i] = Math.min(255, 150 * amp * (0.7 + 0.3 * nuSlice / 7));
+      data[i + 1] = Math.min(255, 185 * amp);
+      data[i + 2] = Math.min(255, 235 * amp * (1.1 - 0.3 * nuSlice / 7));
+      data[i + 3] = Math.min(255, 120 * amp * muS + 10);
+    }
+  }
+  return { data, w, h };
+}
+
+function makeTable(kind, three) {
+  const { data, w, h } = tableBytes(kind);
+  const tex = new three.DataTexture(data, w, h,
+    three.RGBAFormat, three.UnsignedByteType);
+  tex.minFilter = three.LinearFilter;
+  tex.magFilter = three.LinearFilter;
+  tex.wrapS = three.ClampToEdgeWrapping;
+  tex.wrapT = three.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function viewFrame(camera) {
+  camera.updateMatrixWorld();
+  const centerView = new THREE.Vector3(0, 0, 0).applyMatrix4(camera.matrixWorldInverse);
+  const viewToLocal = new THREE.Matrix3().setFromMatrix4(camera.matrixWorld);
+  return { centerView, viewToLocal };
+}
+
+function makeGlslMaterial(fragment, camera) {
+  const { centerView, viewToLocal } = viewFrame(camera);
+  const v3 = a => new THREE.Vector3(a[0], a[1], a[2]);
+  return new THREE.ShaderMaterial({
+    name: "P5c13 atmosphere SE shell GLSL reference",
+    uniforms: {
+      intensity: { value: cfg.intensity },
+      uBodyRadius: { value: cfg.bodyRadius },
+      uShellRadius: { value: cfg.shellRadius },
+      uInsideShell: { value: cfg.insideShell },
+      uEyeHeightR: { value: cfg.eyeHeightR },
+      uSkySamples: { value: cfg.skySamples },
+      uHaloEdgeStart: { value: 0 },
+      uViewToBodyLocal: { value: viewToLocal },
+      uBodyAxisScale: { value: v3(cfg.axisScale) },
+      uBodyCenterView: { value: centerView },
+      uLimbDarken: { value: 0 },
+      uBacklightLevel: { value: 0 },
+      uDarkOcclusion: { value: 0 },
+      uSunDir: { value: v3(cfg.sunDir) },
+      uSunIntensity: { value: cfg.sunIntensity },
+      uTransmittanceLut: { value: makeTable("trans", THREE) },
+      uInscatterLut: { value: makeTable("inscat", THREE) },
+      uRgKm: { value: cfg.rgKm },
+      uRtNorm: { value: cfg.rtNorm },
+      uBetaR: { value: v3(cfg.betaR) },
+      uBetaMS: { value: v3(cfg.betaMS) },
+      uMieTint: { value: v3(cfg.mieTint) },
+      uBetaMX: { value: v3(cfg.betaMX) },
+      uHR: { value: cfg.HR }, uHM: { value: cfg.HM }, uSkyGain: { value: cfg.skyGain },
+      uMieG: { value: cfg.mieG },
+      uMieFade: { value: cfg.mieFade },
+      uLutGain: { value: cfg.lutGain }
+    },
+    vertexShader: `
+      varying vec3 vAtmoView;
+      varying vec3 vWorldPos;
+      void main(){
+          vec4 world = modelMatrix * vec4(position, 1.0);
+          vWorldPos = world.xyz;
+          vAtmoView = (viewMatrix * world).xyz;
+          gl_Position = projectionMatrix * vec4(vAtmoView, 1.0);
+      }
+    `,
+    fragmentShader: fragment,
+    side: THREE.DoubleSide,
+    transparent: false
+  });
+}
+
+const member = (node, name) => typeof node.get === "function" ? node.get(name) : node[name];
+
+function makeTslMaterial(camera) {
+  const { centerView, viewToLocal } = viewFrame(camera);
+  const material = new MeshBasicNodeMaterial({ name: "P5c13 atmosphere SE shell TSL" });
+  material.side = NodeDoubleSide;
+  const three = {
+    DataTexture: NodeDataTexture, RGBAFormat: NodeRGBAFormat,
+    UnsignedByteType: NodeUnsignedByteType, LinearFilter: NodeLinearFilter,
+    ClampToEdgeWrapping: NodeClampToEdgeWrapping
+  };
+  const shell = createAtmosphereShellSE({
+    intensity: cfg.intensity,
+    bodyRadius: cfg.bodyRadius,
+    shellRadius: cfg.shellRadius,
+    insideShell: cfg.insideShell,
+    viewToBodyLocal: new NodeMatrix3().copy(viewToLocal),
+    bodyAxisScale: cfg.axisScale,
+    bodyCenterView: new NodeVector3(centerView.x, centerView.y, centerView.z),
+    sunDir: cfg.sunDir,
+    sunIntensity: cfg.sunIntensity,
+    transmittanceLut: makeTable("trans", three),
+    inscatterLut: makeTable("inscat", three),
+    rgKm: cfg.rgKm,
+    rtNorm: cfg.rtNorm,
+    mieG: cfg.mieG,
+    mieTint: cfg.mieTint,
+    mieFade: cfg.mieFade,
+    lutGain: cfg.lutGain,
+    insideSky: {
+      betaR: cfg.betaR, betaMS: cfg.betaMS, betaMX: cfg.betaMX,
+      HR: cfg.HR, HM: cfg.HM, rtNorm: cfg.rtNorm,
+      skyGain: cfg.skyGain, eyeHeightR: cfg.eyeHeightR,
+      skySamples: cfg.skySamples
+    },
+    eclipseVisibility: cfg.eclipseFactor ? Number(cfg.eclipseFactor) : undefined
+  });
+  const out = shell.atmosphereShellSEColorNode();
+  const color = member(out, "color");
+  const keep = member(out, "keep");
+  const alpha = color.a;
+  const encoded = vec4(
+    color.rgb.mul(alpha.mul(0.65).add(0.35)).add(vec3(0.0, 0.0, alpha.mul(0.35))),
+    float(1.0));
+  material.colorNode = select(keep.greaterThan(0.5), encoded, vec4(0.0, 0.0, 0.0, 1.0));
+  return material;
+}
+
+try {
+  const fragment = impl === "glsl" ? await loadProductionFragment() : null;
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(38, 1, 0.05, 50);
+    camera.position.set(...cfg.camPos);
+    camera.lookAt(...cfg.camTarget);
+    material = makeGlslMaterial(fragment, camera);
+    mesh = new THREE.Mesh(new THREE.SphereGeometry(cfg.shellRadius, 96, 64), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(38, 1, 0.05, 50);
+    camera.position.set(...cfg.camPos);
+    camera.lookAt(...cfg.camTarget);
+    material = makeTslMaterial(camera);
+    mesh = new NodeMesh(new NodeSphereGeometry(cfg.shellRadius, 96, 64), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5shell = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    insideShell: cfg.insideShell,
+    eclipseApplied: cfg.eclipseFactor !== "", 
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c13 atmosphere SE shell ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5shell = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c13 atmosphere SE shell error: " + window.__p5shell.error;
+}
+</script>
+</body>
+</html>

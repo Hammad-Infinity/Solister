@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><script type="importmap">
+{
+  "imports": {
+    "three": "../../vendor/three-r186/three.module.js",
+    "three/addons/": "../../vendor/three-r186/addons/"
+  }
+}
+</script>
+<title>Solister - baked maps on spheres</title>
+<style>html, body { margin: 0; background: #05060a; } canvas { display: block; }</style>
+</head>
+<body>
+<canvas id="view" width="1024" height="512"></canvas>
+<script type="module">
+import "../../src/app/three-runtime.js";
+await new Promise((resolve, reject) => { const s=document.createElement("script"); s.src="../../src/render/terra-bake.js"; s.onload=resolve; s.onerror=reject; document.head.appendChild(s); });
+// The maps seen the way the app shows them: lit spheres. Checks the seam at
+// longitude 0 and the pole pinch, which the flat strip cannot show.
+const canvas = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+renderer.setPixelRatio(1);
+renderer.setSize(1024, 512, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const keys = [ "mars", "venus", "mercury", "moon" ];
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, 1024 / 512, 0.1, 100);
+camera.position.set(0, 0, 9);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.28));
+const sun = new THREE.DirectionalLight(0xffffff, 2.4);
+sun.position.set(-4, 1.5, 5);
+scene.add(sun);
+
+const geometry = new THREE.SphereGeometry(1, 96, 64);
+const report = [];
+keys.forEach((key, index) => {
+    const started = performance.now();
+    const texture = bakeTerraMap(renderer, key, { width: 512 });
+    report.push({ key: key, ok: !!texture, ms: Math.round(performance.now() - started) });
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ map: texture, roughness: 1, metalness: 0 }));
+    mesh.position.x = (index - 1.5) * 2.35;
+    // rotate so both the seam (u=0) and a mid-meridian are visible
+    mesh.rotation.y = -0.6 + index * 0.4;
+    scene.add(mesh);
+});
+
+renderer.render(scene, camera);
+window.__sphereReport = report;
+window.__sphereDone = true;
+</script>
+</body>
+</html>

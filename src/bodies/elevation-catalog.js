@@ -6,7 +6,15 @@ const DATA_WIDTH = 2048;
 
 const DATA_HEIGHT = 1024;
 
-const LONGITUDE_OFFSET = .75;
+const DEM_LONGITUDE_OFFSET = Object.freeze({
+    earth: .25
+});
+
+const DEM_FLIP_V = true;
+
+function demLongitudeOffset(key) {
+    return DEM_LONGITUDE_OFFSET[key] || 0;
+}
 
 const ELEVATION_VERTICAL_EXAGGERATION = 1;
 
@@ -104,19 +112,17 @@ export class ElevationCatalog {
             for (let i = 0; i < values.length; i++) bumpValues[i] = values[i] >>> 8;
             const isWebGL2 = this.getRenderer?.()?.capabilities?.isWebGL2 !== false;
             const textureFormat = isWebGL2 && T.RedFormat !== undefined ? T.RedFormat : T.LuminanceFormat;
-            // WebGL2's RED + UNSIGNED_SHORT combination has no sized internal
-            // format in the renderer. Use the guaranteed R8/LUMINANCE8 path for
-            // the GPU bump approximation; the CPU relief still samples all 16 bits.
             const heightTexture = new T.DataTexture(bumpValues, DATA_WIDTH, DATA_HEIGHT, textureFormat, T.UnsignedByteType);
             heightTexture.name = `${key}-global-elevation-bump`;
             heightTexture.colorSpace = T.NoColorSpace;
             heightTexture.wrapS = T.RepeatWrapping;
             heightTexture.wrapT = T.ClampToEdgeWrapping;
             heightTexture.magFilter = T.LinearFilter;
-            heightTexture.minFilter = T.LinearFilter;
-            heightTexture.generateMipmaps = false;
+            heightTexture.minFilter = T.LinearMipmapLinearFilter;
+            heightTexture.generateMipmaps = true;
             heightTexture.unpackAlignment = 1;
-            heightTexture.offset.x = LONGITUDE_OFFSET;
+            heightTexture.repeat.set(1, DEM_FLIP_V ? -1 : 1);
+            heightTexture.offset.set(demLongitudeOffset(key), DEM_FLIP_V ? 1 : 0);
             heightTexture.userData = { sourceBitsPerSample: 16, gpuBitsPerSample: 8 };
             heightTexture.needsUpdate = true;
             const map = {
@@ -187,8 +193,9 @@ export class ElevationCatalog {
         const qy = Math.sin(latitude);
         const qz = Math.cos(latitude) * Math.cos(longitude);
         const sphereU = Math.atan2(qz, -qx) / (Math.PI * 2);
-        const u = wrap01(sphereU + LONGITUDE_OFFSET);
-        const v = 1 - Math.acos(Math.max(-1, Math.min(1, qy))) / Math.PI;
+        const u = wrap01(sphereU + demLongitudeOffset(key));
+        const vSphere = 1 - Math.acos(Math.max(-1, Math.min(1, qy))) / Math.PI;
+        const v = DEM_FLIP_V ? 1 - vSphere : vSphere;
         const x = u * map.width - .5;
         const x0Raw = Math.floor(x);
         const x0 = (x0Raw % map.width + map.width) % map.width;
@@ -360,9 +367,9 @@ export class ElevationCatalog {
             const [minimum, maximum] = entry.encodingRangeM;
             const range = maximum - minimum;
             const px = positions.array;
-            for (let i = 0; i < positions.count; i++) {
-                const u = wrap01(uvs.getX(i) + LONGITUDE_OFFSET);
-                const v = Math.max(0, Math.min(1, uvs.getY(i)));
+            const elevationAt = i => {
+                const u = wrap01(uvs.getX(i) + demLongitudeOffset(key));
+                const v = Math.max(0, Math.min(1, DEM_FLIP_V ? 1 - uvs.getY(i) : uvs.getY(i)));
                 const x = u * width - .5;
                 const x0Raw = Math.floor(x);
                 const x0 = (x0Raw % width + width) % width;
@@ -378,10 +385,44 @@ export class ElevationCatalog {
                 const i11 = y1 * width + x1;
                 const h0 = values[i00] * (1 - fx) + values[i10] * fx;
                 const h1 = values[i01] * (1 - fx) + values[i11] * fx;
-                const elevationM = minimum + (h0 * (1 - fy) + h1 * fy) / 65535 * range;
+                return minimum + (h0 * (1 - fy) + h1 * fy) / 65535 * range;
+            };
+            const demRowAt = (i, h) => {
+                const v = Math.max(0, Math.min(1, DEM_FLIP_V ? 1 - uvs.getY(i) : uvs.getY(i)));
+                return v * h;
+            };
+            let firstNorthRow = Infinity, firstSouthRow = -Infinity;
+            for (let i = 0; i < positions.count; i++) {
+                const row = demRowAt(i, height);
+                if (row > 0 && row < firstNorthRow) firstNorthRow = row;
+                if (row < height && row > firstSouthRow) firstSouthRow = row;
+            }
+            if (!Number.isFinite(firstNorthRow) || firstNorthRow <= 0) firstNorthRow = 1;
+            if (!Number.isFinite(firstSouthRow) || firstSouthRow >= height) firstSouthRow = height - 1;
+            let northSum = 0, northCount = 0, southSum = 0, southCount = 0;
+            for (let i = 0; i < positions.count; i++) {
+                const row = demRowAt(i, height);
+                if (row > 0 && row <= firstNorthRow) {
+                    northSum += elevationAt(i);
+                    northCount++;
+                } else if (row < height && row >= firstSouthRow) {
+                    southSum += elevationAt(i);
+                    southCount++;
+                }
+            }
+            const northPoleM = northCount ? northSum / northCount : null;
+            const southPoleM = southCount ? southSum / southCount : null;
+            for (let i = 0; i < positions.count; i++) {
                 const p = i * 3;
                 const x0p = px[p], y0p = px[p + 1], z0p = px[p + 2];
                 const length = Math.hypot(x0p, y0p, z0p) || 1;
+                let elevationM = elevationAt(i);
+                const row = demRowAt(i, height);
+                if (row <= firstNorthRow && northPoleM !== null) {
+                    elevationM += (northPoleM - elevationM) * Math.max(0, 1 - row / firstNorthRow);
+                } else if (row >= firstSouthRow && southPoleM !== null) {
+                    elevationM += (southPoleM - elevationM) * Math.max(0, 1 - (height - row) / Math.max(1e-6, height - firstSouthRow));
+                }
                 const elevationOffset = elevationM * ELEVATION_VERTICAL_EXAGGERATION * unitScale;
                 const delta = elevationOffset / length;
                 px[p] = x0p * (1 + delta);
@@ -398,7 +439,12 @@ export class ElevationCatalog {
             geometry.userData.elevationVerticalExaggeration = ELEVATION_VERTICAL_EXAGGERATION;
         }
         const [minimum, maximum] = map.entry.encodingRangeM;
-        const bumpScale = (maximum - minimum) * unitScale * ELEVATION_VERTICAL_EXAGGERATION;
+        const displaced = geometry.userData?.elevationApplied === key;
+        const gridWidth = geometry.parameters?.widthSegments || 0;
+        const gridHeight = geometry.parameters?.heightSegments || 0;
+        const resolvedBand = displaced && gridWidth > 0 && gridHeight > 0 ? Math.min(1, Math.min(gridWidth / DATA_WIDTH, gridHeight / DATA_HEIGHT)) : 0;
+        const residualRelief = displaced ? Math.max(.15, 1 - Math.sqrt(resolvedBand)) : 1;
+        const bumpScale = (maximum - minimum) * unitScale * ELEVATION_VERTICAL_EXAGGERATION * residualRelief;
         for (const material of Array.isArray(mesh.material) ? mesh.material : [ mesh.material ]) {
             if (!material) continue;
             const bumpMapChanged = material.bumpMap !== map.heightTexture;
@@ -407,6 +453,7 @@ export class ElevationCatalog {
             material.userData = material.userData || {};
             material.userData.elevationMap = key;
             material.userData.elevationVerticalExaggeration = ELEVATION_VERTICAL_EXAGGERATION;
+            material.userData.elevationBumpResidualRelief = residualRelief;
             if (bumpMapChanged) material.needsUpdate = true;
         }
         return true;

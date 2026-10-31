@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e1 — flip architecture probe: classic materials on WebGPURenderer</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 8px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e1 flip probe starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import * as W from "three/webgpu";
+
+// P5e1 flip-audit probe: what happens to each classic production
+// material mechanism when the renderer is WebGPURenderer and the
+// THREE namespace is three/webgpu (the only shape a flipped
+// production could take)? Cases:
+//   0 classic MeshStandardMaterial lit sphere
+//   1 MeshStandardNodeMaterial, same parameters (control)
+//   2 classic MeshStandardMaterial + production-style onBeforeCompile
+//     tint patch (red multiply) -- does the patch apply?
+//   3 classic ShaderMaterial (flat GLSL colour)
+//   4 classic PointsMaterial, size 24 px, one point -- drawn size?
+//   5 PointsNodeMaterial, size 24 px (control)
+//   6 classic MeshPhysicalMaterial (BRDF-relevant built-in)
+//   7 MeshPhysicalNodeMaterial, same parameters (control)
+//   8 classic MeshStandardMaterial with color+roughness animated
+//     per frame before capture -- do updates reach the conversion?
+//   9 MeshStandardNodeMaterial, same animation (control)
+// The page only reports; tools/p5flipprobe.mjs measures the frames.
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+const CASES = [
+  "classic-standard", "node-standard", "classic-standard-obc",
+  "classic-shader", "classic-points", "node-points",
+  "classic-physical", "node-physical",
+  "classic-standard-anim", "node-standard-anim"
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const caseName = CASES[caseIndex];
+
+window.__p5flip = { done: false, error: null };
+
+function describe(material) {
+  return {
+    type: material.type,
+    ctor: material.constructor?.name || null,
+    isNodeMaterial: material.isNodeMaterial === true,
+    isMeshStandardMaterial: material.isMeshStandardMaterial === true,
+    isMeshPhysicalMaterial: material.isMeshPhysicalMaterial === true,
+    isShaderMaterial: material.isShaderMaterial === true,
+    hasOnBeforeCompilePatch: typeof material.onBeforeCompile === "function" &&
+      material.onBeforeCompile.toString().includes("uFlipTint")
+  };
+}
+
+function makeMaterial() {
+  switch (caseName) {
+    case "classic-standard":
+      return new W.MeshStandardMaterial({ color: 0x7f8c9e, roughness: 0.55, metalness: 0.1 });
+    case "node-standard":
+      return new W.MeshStandardNodeMaterial({ color: 0x7f8c9e, roughness: 0.55, metalness: 0.1 });
+    case "classic-standard-obc": {
+      const m = new W.MeshStandardMaterial({ color: 0x7f8c9e, roughness: 0.55, metalness: 0.1 });
+      m.onBeforeCompile = (shader) => {
+        shader.uniforms.uFlipTint = { value: new W.Color(1.0, 0.12, 0.12) };
+        shader.fragmentShader = "uniform vec3 uFlipTint;\n" + shader.fragmentShader
+          .replace("#include <color_fragment>", "#include <color_fragment>\n\tdiffuseColor.rgb *= uFlipTint;");
+      };
+      m.customProgramCacheKey = () => "p5-flip-probe-obc";
+      return m;
+    }
+    case "classic-shader":
+      return new W.ShaderMaterial({
+        vertexShader: "void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+        fragmentShader: "void main(){ gl_FragColor = vec4(0.25, 0.55, 0.85, 1.0); }"
+      });
+    case "classic-points":
+      return new W.PointsMaterial({ color: 0xffcc66, size: 24, sizeAttenuation: false });
+    case "node-points": {
+      const m = new W.PointsNodeMaterial({ color: 0xffcc66 });
+      m.size = 24;
+      m.sizeAttenuation = false;
+      return m;
+    }
+    case "classic-physical":
+      return new W.MeshPhysicalMaterial({ color: 0x7f8c9e, roughness: 0.55, metalness: 0.1, ior: 1.46, specularIntensity: 0.7 });
+    case "node-physical":
+      return new W.MeshPhysicalNodeMaterial({ color: 0x7f8c9e, roughness: 0.55, metalness: 0.1, ior: 1.46, specularIntensity: 0.7 });
+    case "classic-standard-anim":
+      return new W.MeshStandardMaterial({ color: 0xff0000, roughness: 0.1, metalness: 0.0 });
+    case "node-standard-anim":
+      return new W.MeshStandardNodeMaterial({ color: 0xff0000, roughness: 0.1, metalness: 0.0 });
+  }
+}
+
+try {
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: true,
+    search: location.search,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = W.LinearSRGBColorSpace;
+  renderer.toneMapping = W.NoToneMapping;
+  renderer.setClearColor(new W.Color(0, 0, 0), 1);
+
+  const scene = new W.Scene();
+  const camera = new W.PerspectiveCamera(40, 1, 0.1, 50);
+  camera.position.set(0, 0, 3.2);
+  camera.lookAt(0, 0, 0);
+
+  const sun = new W.DirectionalLight(0xffffff, 3.0);
+  sun.position.set(2, 1.5, 2.5);
+  scene.add(sun);
+  scene.add(new W.AmbientLight(0xffffff, 0.25));
+
+  const material = makeMaterial();
+  let object;
+  if (caseName.includes("points")) {
+    const g = new W.BufferGeometry();
+    g.setAttribute("position", new W.BufferAttribute(new Float32Array([0, 0, 0]), 3));
+    object = new W.Points(g, material);
+  } else {
+    object = new W.Mesh(new W.SphereGeometry(1, 64, 48), material);
+  }
+  scene.add(object);
+
+  const animate = (t) => {
+    if (!caseName.endsWith("-anim")) return;
+    material.color.setRGB(1 - t, 0.85 * t, 0.1);
+    material.roughness = 0.1 + 0.8 * t;
+  };
+  let renderError = null;
+  try {
+    for (let i = 0; i < 5; i++) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      animate(i / 4);
+      renderer.render(scene, camera);
+    }
+  } catch (e) {
+    renderError = String(e?.stack || e);
+  }
+
+  window.__p5flip = {
+    done: true,
+    error: renderError,
+    revision: W.REVISION,
+    info: handle.info,
+    caseIndex,
+    caseName,
+    material: describe(material),
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    rendererCtor: renderer.constructor?.name || null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e1 flip probe ${caseName}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}` +
+    (renderError ? `\nrender error: ${renderError}` : "");
+  if (!renderError) renderer.setAnimationLoop(() => { animate(1); renderer.render(scene, camera); });
+} catch (e) {
+  window.__p5flip = { done: true, error: String(e?.stack || e), revision: W.REVISION, caseIndex, caseName };
+  status.textContent = "P5e1 flip probe error: " + window.__p5flip.error;
+}
+</script>
+</body>
+</html>

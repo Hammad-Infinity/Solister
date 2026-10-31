@@ -1,3 +1,18 @@
+// Albedo maps are seen from orbit down to the ground, at grazing angles where the
+// mip comes from the largest screen-space derivative. At anisotropy 1 that picks
+// visible concentric rings around the horizon, so use the GPU's 16x, which costs nothing extra in memory.
+function applyMaxAnisotropy(texture) {
+    if (!texture) return texture;
+    let max = 1;
+    try {
+        if (typeof renderer !== "undefined" && renderer.capabilities?.getMaxAnisotropy) {
+            max = renderer.capabilities.getMaxAnisotropy() || 1;
+        }
+    } catch (error) { /* no renderer yet: leave the default */ }
+    texture.anisotropy = Math.max(texture.anisotropy || 1, Math.min(16, max));
+    return texture;
+}
+
 function createCanvasTexture(width, height, drawFn) {
     const canvas = document.createElement("canvas");
     canvas.width = width;
@@ -9,85 +24,17 @@ function createCanvasTexture(width, height, drawFn) {
     texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
+    applyMaxAnisotropy(texture);
     return texture;
 }
 
-function createEarthCloudTexture() {
+// The pattern itself lives in render/clouds/cloud-field.js: it is the piece
+// with the measured numbers in it, and it is dense enough to want its own file.
+// This is the cache and the naming, nothing else.
+function createEarthCloudTexture(options) {
     if (proceduralTextures["earth-clouds"]) return proceduralTextures["earth-clouds"];
-    const width = 512;
-    const height = 256;
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) return null;
-    let seed = 19472831;
-    const random = () => {
-        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-        return seed / 4294967296;
-    };
-    const octaves = [
-        [ 6, 3, .34 ],
-        [ 12, 6, .24 ],
-        [ 24, 12, .17 ],
-        [ 48, 24, .12 ],
-        [ 96, 48, .08 ],
-        [ 192, 96, .05 ]
-    ].map(([gridWidth, gridHeight, weight]) => {
-        const values = new Float32Array(gridWidth * gridHeight);
-        for (let i = 0; i < values.length; i++) values[i] = random();
-        return {
-            width: gridWidth,
-            height: gridHeight,
-            weight: weight,
-            values: values
-        };
-    });
-    const sample = (grid, u, v) => {
-        const x = u * grid.width;
-        const xFloor = Math.floor(x);
-        const x0 = (xFloor % grid.width + grid.width) % grid.width;
-        const x1 = (x0 + 1) % grid.width;
-        const fx = x - xFloor;
-        const y = Math.max(0, Math.min(grid.height - 1, v * (grid.height - 1)));
-        const y0 = Math.floor(y);
-        const y1 = Math.min(grid.height - 1, y0 + 1);
-        const fy = y - y0;
-        const a = grid.values[y0 * grid.width + x0] * (1 - fx) + grid.values[y0 * grid.width + x1] * fx;
-        const b = grid.values[y1 * grid.width + x0] * (1 - fx) + grid.values[y1 * grid.width + x1] * fx;
-        return a * (1 - fy) + b * fy;
-    };
-    const smooth = (edge0, edge1, value) => {
-        const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
-        return t * t * (3 - 2 * t);
-    };
-    const image = context.createImageData(width, height);
-    const pixels = image.data;
-    for (let y = 0; y < height; y++) {
-        const v = (y + .5) / height;
-        const polar = Math.abs(2 * v - 1);
-        for (let x = 0; x < width; x++) {
-            const u = (x + .5) / width;
-            let field = 0;
-            for (const grid of octaves) field += sample(grid, u, v) * grid.weight;
-            const threshold = .39 + polar * .05;
-            const density = smooth(threshold, threshold + .17, field);
-            const index = (y * width + x) * 4;
-            const signal = Math.round(density * 255);
-            pixels[index] = signal;
-            pixels[index + 1] = signal;
-            pixels[index + 2] = signal;
-            pixels[index + 3] = 255;
-        }
-    }
-    context.putImageData(image, 0, 0);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.name = "Deterministic procedural Earth cloud cover";
+    const texture = createCloudFieldTexture(THREE, options || {});
     texture.userData.cloudMaskChannel = "rgb";
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.ClampToEdgeWrapping;
-    texture.colorSpace = THREE.NoColorSpace;
-    texture.needsUpdate = true;
     proceduralTextures["earth-clouds"] = texture;
     return texture;
 }
@@ -538,6 +485,52 @@ function drawSaturnRingTexture(ctx, w, h) {
     }
 }
 
+// Gloss mask for Earth's surface: water is smooth enough to hold a sun glint,
+// land is not. Sampled from the albedo the Earth already paints, so coastline
+// and mask can never drift apart. Stored as roughness values, not colour, so it
+// stays in linear space.
+function createEarthWaterMask() {
+    if (proceduralTextures["earth-water"]) return proceduralTextures["earth-water"];
+    const source = proceduralTextures.earth;
+    if (!source?.image) return null;
+    const width = source.image.width, height = source.image.height;
+    const read = document.createElement("canvas");
+    read.width = width;
+    read.height = height;
+    const rctx = read.getContext("2d", {
+        willReadFrequently: true
+    });
+    rctx.drawImage(source.image, 0, 0);
+    const pixels = rctx.getImageData(0, 0, width, height);
+    const target = document.createElement("canvas");
+    target.width = width;
+    target.height = height;
+    const tctx = target.getContext("2d");
+    const mask = tctx.createImageData(width, height);
+    for (let i = 0; i < pixels.data.length; i += 4) {
+        const r = pixels.data[i], g = pixels.data[i + 1], b = pixels.data[i + 2];
+        // Ocean paint is blue-dominant; anything greener or browner is land.
+        const water = b > r * 1.25 && b > g * 1.06;
+        // THREE multiplies the material roughness factor by this texel's green
+        // channel, so the texel value IS the roughness. 0.13 is a wind-ruffled
+        // sea: the sun's mirror spreads into a glitter path about 6 degrees
+        // wide, which is what makes the ocean the brightest thing in the frame.
+        // Land stays fully rough and never glints.
+        const value = water ? 33 : 255;
+        mask.data[i] = mask.data[i + 1] = mask.data[i + 2] = value;
+        mask.data[i + 3] = 255;
+    }
+    tctx.putImageData(mask, 0, 0);
+    const texture = new THREE.CanvasTexture(target);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.colorSpace = THREE.NoColorSpace;
+    texture.needsUpdate = true;
+    applyMaxAnisotropy(texture);
+    proceduralTextures["earth-water"] = texture;
+    return texture;
+}
+
 function getProceduralTexture(key) {
     if (!proceduralTextures[key]) {
         const drawFn = proceduralDrawFns[key];
@@ -604,9 +597,11 @@ function createEarthNightLights() {
             }
         },
         vertexShader: `\n            ${globalThis.LDB_VERTEX_PARS || ""}\n            varying vec2 vUv;\n            varying vec3 vNormal;\n            void main() {\n                vUv = uv;\n                vNormal = normalize(mat3(modelMatrix) * normal);\n                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);\n                ${globalThis.LDB_VERTEX_TAIL || ""}\n            }\n        `,
-        fragmentShader: `\n            uniform sampler2D dayTexture;\n            uniform mat3 dayTextureMatrix;\n            uniform float hasDayTexture;\n            uniform sampler2D nightTexture;\n            uniform mat3 nightTextureMatrix;\n            uniform sampler2D cloudTexture;\n            uniform mat3 cloudTextureMatrix;\n            uniform float hasCloudTexture;\n            uniform float cloudUseAlpha;\n            uniform float cloudMaskOpacity;\n            uniform vec3 sunDirection;\n            uniform float uInsideShell;\n            varying vec2 vUv;\n            varying vec3 vNormal;\n            ${globalThis.LDB_FRAGMENT_PARS || ""}\n            void main() {\n                ${globalThis.LDB_FRAGMENT_HEAD || ""}\n                if ((uInsideShell < 0.5 && !gl_FrontFacing) || (uInsideShell >= 0.5 && gl_FrontFacing)) discard;\n                float mu = dot(normalize(vNormal), normalize(sunDirection));\n                float nightFactor = 1.0 - smoothstep(-0.12, 0.14, mu);\n                vec2 dayUv = (dayTextureMatrix * vec3(vUv, 1.0)).xy;\n                vec2 nightUv = (nightTextureMatrix * vec3(vUv, 1.0)).xy;\n                float cloudOcclusion = 0.0;\n                if (hasCloudTexture > 0.5 && cloudMaskOpacity > 0.001) {\n                    vec2 cloudUv = (cloudTextureMatrix * vec3(vUv, 1.0)).xy;\n                    vec4 cloudSample = texture2D(cloudTexture, cloudUv);\n                    float cloudRgb = max(cloudSample.r, max(cloudSample.g, cloudSample.b));\n                    float cloudDensity = mix(cloudRgb, cloudSample.a, cloudUseAlpha);\n                    float coverage = smoothstep(0.38, 0.60, cloudDensity) * cloudMaskOpacity;\n                    cloudOcclusion = smoothstep(0.02, 0.18, coverage);\n                }\n                float clearFactor = 1.0 - cloudOcclusion;\n                vec3 dayColor = hasDayTexture > 0.5 ? texture2D(dayTexture, dayUv).rgb : vec3(0.0);\n                vec3 nightColor = texture2D(nightTexture, nightUv).rgb;\n                vec3 citySignal = max(nightColor - vec3(0.02), vec3(0.0));\n                float cityLevel = max(max(citySignal.r, citySignal.g), citySignal.b);\n                float cityMask = smoothstep(0.008, 0.03, cityLevel);\n                // Keep the unlit land/ocean close to black; bright terrain bleed makes the
-                // night hemisphere look self-illuminated instead of showing only faint earthshine.
-                vec3 surfaceGlow = dayColor * vec3(0.018, 0.024, 0.040) + vec3(0.00025, 0.00040, 0.00080);\n                vec3 cityGlow = pow(citySignal, vec3(0.82)) * vec3(1.45, 1.05, 0.68) * cityMask;\n                gl_FragColor = vec4(surfaceGlow + cityGlow, nightFactor * 0.9 * clearFactor);\n                #include <tonemapping_fragment>\n                ${THREE.ShaderChunk.colorspace_fragment ? "#include <colorspace_fragment>" : "#include <encodings_fragment>"}\n            }\n        `,
+        fragmentShader: `\n            uniform sampler2D dayTexture;\n            uniform mat3 dayTextureMatrix;\n            uniform float hasDayTexture;\n            uniform sampler2D nightTexture;\n            uniform mat3 nightTextureMatrix;\n            uniform sampler2D cloudTexture;\n            uniform mat3 cloudTextureMatrix;\n            uniform float hasCloudTexture;\n            uniform float cloudUseAlpha;\n            uniform float cloudMaskOpacity;\n            uniform vec3 sunDirection;\n            uniform float uInsideShell;\n            varying vec2 vUv;\n            varying vec3 vNormal;\n            ${globalThis.LDB_FRAGMENT_PARS || ""}\n            void main() {\n                ${globalThis.LDB_FRAGMENT_HEAD || ""}\n                if ((uInsideShell < 0.5 && !gl_FrontFacing) || (uInsideShell >= 0.5 && gl_FrontFacing)) discard;\n                float mu = dot(normalize(vNormal), normalize(sunDirection));\n                float nightFactor = 1.0 - smoothstep(-0.12, 0.0, mu);\n                vec2 dayUv = (dayTextureMatrix * vec3(vUv, 1.0)).xy;\n                vec2 nightUv = (nightTextureMatrix * vec3(vUv, 1.0)).xy;\n                float cloudOcclusion = 0.0;\n                if (hasCloudTexture > 0.5 && cloudMaskOpacity > 0.001) {\n                    vec2 cloudUv = (cloudTextureMatrix * vec3(vUv, 1.0)).xy;\n                    vec4 cloudSample = texture2D(cloudTexture, cloudUv);\n                    float cloudRgb = max(cloudSample.r, max(cloudSample.g, cloudSample.b));\n                    float cloudDensity = mix(cloudRgb, cloudSample.a, cloudUseAlpha);\n                    float coverage = smoothstep(0.38, 0.60, cloudDensity) * cloudMaskOpacity;\n                    cloudOcclusion = smoothstep(0.02, 0.18, coverage);\n                }\n                float clearFactor = 1.0 - cloudOcclusion;\n                vec3 dayColor = hasDayTexture > 0.5 ? texture2D(dayTexture, dayUv).rgb : vec3(0.0);\n                vec3 nightColor = texture2D(nightTexture, nightUv).rgb;\n                vec3 citySignal = max(nightColor - vec3(0.02), vec3(0.0));\n                float cityLevel = max(max(citySignal.r, citySignal.g), citySignal.b);\n                float cityMask = smoothstep(0.008, 0.03, cityLevel);\n                // Keep the unlit land/ocean close to black; bright terrain bleed makes the
+                // Earthshine, applied to the day map over the night hemisphere. Kept only
+                // mildly cool (1.4x red) and weak: blue-heavy coefficients turned every
+                // ocean pixel into a visible blue wash on the night side.
+                vec3 surfaceGlow = dayColor * vec3(0.0055, 0.0062, 0.0078) + vec3(0.00004, 0.00005, 0.00007);\n                vec3 cityGlow = pow(citySignal, vec3(0.82)) * vec3(1.45, 1.05, 0.68) * cityMask;\n                gl_FragColor = vec4(surfaceGlow + cityGlow, nightFactor * 0.9 * clearFactor);\n                #include <tonemapping_fragment>\n                ${THREE.ShaderChunk.colorspace_fragment ? "#include <colorspace_fragment>" : "#include <encodings_fragment>"}\n            }\n        `,
         transparent: true,
         depthTest: true,
         depthWrite: false,

@@ -85,7 +85,7 @@ export function installAnchoredDock() {
     };
 }
 
-const CLOUD_SHADOW_QUALITY = Object.freeze({ medium: true, high: true });
+const CLOUD_SHADOW_QUALITY = Object.freeze({ low: true, medium: true, high: true });
 
 function seededPlanetStormRandom(seed) {
     let state = seed >>> 0;

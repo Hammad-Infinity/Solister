@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P4 — atmosphere composite GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P4 atmosphere composite starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createAtmSampling } from "../src/shaders/atm-sampling.tsl.js";
+import { createAtmComposite } from "../src/shaders/planet-atmosphere-composite.tsl.js";
+import * as THREE from "three";
+import * as NodeTHREE from "three/webgpu";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PerspectiveCamera as NodePerspectiveCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  DoubleSide as NodeDoubleSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Matrix3 as NodeMatrix3,
+  REVISION
+} from "three/webgpu";
+import {
+  Fn, cameraProjectionMatrix, clipSpace, modelViewMatrix, positionGeometry, uv,
+  vec2, vec3, vec4, float,
+  cos, dot, floor, fract, length, max, mix, normalize, select, sin, sqrt
+} from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const view = ["composite", "inject", "sky"].includes(params.get("view"))
+  ? params.get("view") : "composite";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const debugMode = Math.max(0, Math.min(6, Number(params.get("debug") || 0) | 0));
+const canvas = document.getElementById("c");
+
+const CASES = [
+  {
+    eyeR: 33166.3, axis: [1, 1, 1], colAdjust: [0, 1], scatterBright: 1,
+    deltaMin: -0.017, sunA: [0.8, 0.1, 0.45], sunB: [-0.35, 0.45, 0.8],
+    fixedSun: [0.55, 0.18, 0.82], irradiance: [1.6, 1.434, 1.193], skyIrradianceScale: 4,
+    cameraDir: [0, 0, 1], fov: 24
+  },
+  {
+    eyeR: 12000.0, axis: [1, 1.11, 1], colAdjust: [0.03, 1.15], scatterBright: 0.9,
+    deltaMin: -0.12, sunA: [-0.7, 0.25, 0.55], sunB: [0.45, -0.3, 0.75],
+    fixedSun: [0.75, 0.28, 0.6], irradiance: [1.5, 1.35, 1.15], skyIrradianceScale: 4,
+    cameraDir: [0.8, 0.3, 0.55], fov: 42
+  },
+  {
+    eyeR: 7200.0, axis: [1, 0.94, 1], colAdjust: [-0.02, 0.85], scatterBright: 1.07,
+    deltaMin: -0.45, sunA: [0.25, 0.8, 0.35], sunB: [-0.8, -0.15, 0.5],
+    fixedSun: [0.72, -0.22, 0.62], irradiance: [1.6, 1.45, 1.25], skyIrradianceScale: 6,
+    cameraDir: [-0.35, 0.5, 1], fov: 62
+  }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+const forcedBand = params.has("band") ? Math.max(0, Math.min(7, Number(params.get("band") || 0) | 0)) : -1;
+
+window.__p4b = { done: false, error: null };
+
+function loadClassic(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("failed to load " + src));
+    document.head.appendChild(script);
+  });
+}
+
+async function loadText(src) {
+  const response = await fetch(src);
+  if (!response.ok) throw new Error(`failed to fetch ${src}: ${response.status}`);
+  return response.text();
+}
+
+function extractTemplate(source, name) {
+  const marker = `const ${name} = \``;
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(`template ${name} not found`);
+  const bodyStart = start + marker.length;
+  const end = source.indexOf("\n`;", bodyStart);
+  if (end < 0) throw new Error(`template ${name} is not terminated`);
+  return source.slice(bodyStart, end + 1);
+}
+
+function glf(value) {
+  const text = String(value);
+  return /[.eE]/.test(text) ? text : text + ".0";
+}
+
+function gl3(value) {
+  return `vec3(${value.map(glf).join(", ")})`;
+}
+
+function normalized(values) {
+  const n = Math.hypot(...values) || 1;
+  return values.map(v => v / n);
+}
+
+function fixedSunLocalForTable() {
+  return cfg.fixedSun.map((value, i) => value / cfg.axis[i]);
+}
+
+function makeGlslSamplingUniforms(table) {
+  const uniforms = globalThis.atmSamplingUniforms(THREE, table.header, table);
+  uniforms.uAtmAxisScale.value.set(...cfg.axis);
+  uniforms.uAtmColAdjust.value.set(...cfg.colAdjust);
+  uniforms.uAtmScatterBright.value = cfg.scatterBright;
+  return uniforms;
+}
+
+function makeTslSampling(table) {
+  const header = table.header;
+  return createAtmSampling({
+    inscatter: table.s,
+    transmittance: table.t,
+    irradiance: table.e,
+    radii: [
+      header.groundRadiusKm,
+      header.topRadiusKm,
+      header.rayleighScaleHeightKm,
+      header.mieScaleHeightKm
+    ],
+    betaR: header.rayleighBeta,
+    betaMieExt: header.mieExtinctionBeta,
+    mie: [header.mieG, header.mieFade],
+    axisScale: cfg.axis,
+    colAdjust: cfg.colAdjust,
+    scatterBright: cfg.scatterBright
+  });
+}
+
+function compositePrelude() {
+  return `
+    precision highp sampler3D;
+    ${globalThis.ATM_SAMPLING_GLSL}
+    uniform vec3 uAtmSunIrradiance;
+    ${globalThis.ATM_SURFACE_POINT_GLSL}
+    const float ATM_HORIZON_EPS = ${Number(globalThis.ATM_HORIZON_EPS).toFixed(6)};
+    ${globalThis.ATM_COMPOSITE_GLSL}
+  `;
+}
+
+function makeGlslCompositeMaterial(table) {
+  const uniforms = makeGlslSamplingUniforms(table);
+  uniforms.uAtmSunIrradiance = { value: new THREE.Vector3(...cfg.irradiance) };
+  const fixedEyeLocal = [0, 0, cfg.eyeR / cfg.axis[2]];
+  const fixedSunLocal = fixedSunLocalForTable();
+  const kmPerUnit = table.header.groundRadiusKm;
+
+  return new THREE.ShaderMaterial({
+    name: "P4 atmosphere composite GLSL reference",
+    uniforms,
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      varying vec2 vUv;
+      ${compositePrelude()}
+      void main() {
+        float row = ${forcedBand >= 0 ? forcedBand.toFixed(1) : "floor(vUv.y * 8.0)"};
+        vec2 q = ${forcedBand >= 0 ? "vUv" : "vec2(vUv.x, fract(vUv.y * 8.0))"};
+
+        float eyeR = ${glf(cfg.eyeR)};
+        float rg = uAtmRadii.x;
+        float horizon = -sqrt(max(1.0 - (rg / eyeR) * (rg / eyeR), 0.0));
+        float delta = mix(${glf(cfg.deltaMin)}, 0.0008, q.x);
+        float mu = horizon + delta;
+        float st = sqrt(max(1.0 - mu * mu, 0.0));
+        float phi = q.y * 6.28318530718;
+        vec3 eyePos = vec3(0.0, 0.0, eyeR);
+        vec3 viewDir = vec3(st * cos(phi), st * sin(phi), mu);
+
+        float b = eyeR * mu;
+        float disc = b * b - (eyeR * eyeR - rg * rg);
+        float viewLen = disc > 0.0 ? -b - sqrt(disc) : max(-b, 0.0);
+        vec3 groundPos = eyePos + viewDir * viewLen;
+        float rasterOffset = mix(2.0, 80.0, q.y);
+        vec3 rasterPos = eyePos + viewDir * max(viewLen - rasterOffset, 0.0);
+        vec3 fragPos = atmSurfacePoint(rasterPos, eyePos, rg);
+        vec3 sun = normalize(mix(${gl3(cfg.sunA)}, ${gl3(cfg.sunB)}, q.y));
+        vec3 ground = vec3(
+          0.05 + 0.35 * q.x,
+          0.08 + 0.25 * q.y,
+          0.10 + 0.18 * q.x * q.y
+        );
+
+        vec3 air, attenuation;
+        atmCompositeTerms(fragPos, eyePos, sun, air, attenuation);
+        vec3 direct = atmCompositeSurface(groundPos, eyePos, sun, ground);
+        vec3 integrated = atmCompositeSurface(fragPos, eyePos, sun, ground);
+
+        vec3 localEyeKm = atmToTable(${gl3(fixedEyeLocal)});
+        vec3 localSunKm = normalize(atmToTable(${gl3(fixedSunLocal)}));
+        vec3 rasterLocal = (rasterPos / uAtmAxisScale) / ${glf(kmPerUnit)};
+        vec3 localRasterKm = atmToTable(rasterLocal * ${glf(kmPerUnit)});
+        vec3 localFragKm = atmSurfacePoint(localRasterKm, localEyeKm, rg);
+        vec3 localComposite = atmCompositeSurface(localFragKm, localEyeKm, localSunKm, ground);
+
+        float fragR = length(fragPos);
+        float eyeMu = dot(eyePos, viewDir) / eyeR;
+        float fragMu = dot(fragPos, viewDir) / fragR;
+
+        vec3 outColor = vec3(0.0);
+        if (row < 0.5) outColor = fragPos / rg * 0.5 + 0.5;
+        else if (row < 1.5) outColor = rasterPos / rg * 0.5 + 0.5;
+        else if (row < 2.5) outColor = attenuation;
+        else if (row < 3.5) outColor = air * 5.0;
+        else if (row < 4.5) outColor = direct * 1.25;
+        else if (row < 5.5) outColor = localComposite * 1.25;
+        else if (row < 6.5) outColor = integrated * 1.25;
+        else outColor = vec3(fragR / rg, eyeMu * 0.5 + 0.5, fragMu * 0.5 + 0.5);
+        gl_FragColor = vec4(outColor, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslCompositeMaterial(table) {
+  const sampling = makeTslSampling(table);
+  const kmPerUnit = table.header.groundRadiusKm;
+  const composite = createAtmComposite({
+    sampling,
+    sunIrradiance: cfg.irradiance,
+    eyeLocalKm: [0, 0, cfg.eyeR / cfg.axis[2]],
+    sunDirLocal: fixedSunLocalForTable(),
+    kmPerUnit
+  });
+
+  const material = new MeshBasicNodeMaterial({ name: "P4 atmosphere composite TSL" });
+  const shade = Fn(() => {
+    const pUv = uv();
+    const row = forcedBand >= 0 ? float(forcedBand) : floor(pUv.y.mul(8.0));
+    const q = forcedBand >= 0 ? pUv : vec2(pUv.x, fract(pUv.y.mul(8.0)));
+
+    const eyeR = float(cfg.eyeR);
+    const rg = sampling.radii.x;
+    const horizon = sqrt(max(
+      float(1.0).sub(rg.div(eyeR).mul(rg.div(eyeR))),
+      float(0.0)
+    )).mul(-1.0);
+    const delta = mix(float(cfg.deltaMin), float(0.0008), q.x);
+    const mu = horizon.add(delta).toVar("p4bMu");
+    const st = sqrt(max(float(1.0).sub(mu.mul(mu)), float(0.0)));
+    const phi = q.y.mul(6.28318530718).toVar("p4bPhi");
+    const eyePos = vec3(0.0, 0.0, eyeR).toVar("p4bEyePos");
+    const viewDir = vec3(
+      st.mul(cos(phi)),
+      st.mul(sin(phi)),
+      mu
+    ).toVar("p4bViewDir");
+
+    const b = eyeR.mul(mu);
+    const disc = b.mul(b).sub(eyeR.mul(eyeR).sub(rg.mul(rg)));
+    const viewLen = select(
+      disc.greaterThan(0.0),
+      b.mul(-1.0).sub(sqrt(max(disc, float(0.0)))),
+      max(b.mul(-1.0), float(0.0))
+    ).toVar("p4bViewLen");
+    const groundPos = eyePos.add(viewDir.mul(viewLen)).toVar("p4bGroundPos");
+    const rasterOffset = mix(float(2.0), float(80.0), q.y);
+    const rasterPos = eyePos.add(
+      viewDir.mul(max(viewLen.sub(rasterOffset), float(0.0)))
+    ).toVar("p4bRasterPos");
+    const fragPos = composite.atmSurfacePoint(rasterPos, eyePos, rg)
+      .toVar("p4bFragPos");
+    const sun = normalize(mix(vec3(...cfg.sunA), vec3(...cfg.sunB), q.y))
+      .toVar("p4bSunDir");
+    const ground = vec3(
+      float(0.05).add(q.x.mul(0.35)),
+      float(0.08).add(q.y.mul(0.25)),
+      float(0.10).add(q.x.mul(q.y).mul(0.18))
+    ).toVar("p4bGround");
+
+    const terms = composite.atmCompositeTerms(fragPos, eyePos, sun);
+    const attenuation = terms.get("attenuation").toVar("p4bAttenuation");
+    const air = terms.get("air").toVar("p4bAir");
+    const direct = composite.atmCompositeSurface(groundPos, eyePos, sun, ground);
+    const integrated = composite.atmCompositeSurface(fragPos, eyePos, sun, ground);
+    const rasterLocal = rasterPos.div(sampling.axisScale).div(kmPerUnit)
+      .toVar("p4bRasterLocal");
+    const localComposite = composite.atmCompositeLocalSurface(rasterLocal, ground);
+
+    const fragR = length(fragPos).toVar("p4bFragR");
+    const eyeMu = dot(eyePos, viewDir).div(eyeR).toVar("p4bEyeMu");
+    const fragMu = dot(fragPos, viewDir).div(fragR).toVar("p4bFragMu");
+
+    const row0 = fragPos.div(rg).mul(0.5).add(0.5);
+    const row1 = rasterPos.div(rg).mul(0.5).add(0.5);
+    const row2 = attenuation;
+    const row3 = air.mul(5.0);
+    const row4 = direct.mul(1.25);
+    const row5 = localComposite.mul(1.25);
+    const row6 = integrated.mul(1.25);
+    const row7 = vec3(
+      fragR.div(rg),
+      eyeMu.mul(0.5).add(0.5),
+      fragMu.mul(0.5).add(0.5)
+    );
+
+    let outColor = row7;
+    outColor = select(row.lessThan(6.5), row6, outColor);
+    outColor = select(row.lessThan(5.5), row5, outColor);
+    outColor = select(row.lessThan(4.5), row4, outColor);
+    outColor = select(row.lessThan(3.5), row3, outColor);
+    outColor = select(row.lessThan(2.5), row2, outColor);
+    outColor = select(row.lessThan(1.5), row1, outColor);
+    outColor = select(row.lessThan(0.5), row0, outColor);
+    return vec4(outColor, float(1.0));
+  });
+  material.colorNode = shade();
+  return material;
+}
+
+function makePerspectiveCamera(table) {
+  const CameraClass = impl === "glsl" ? THREE.PerspectiveCamera : NodePerspectiveCamera;
+  const camera = new CameraClass(cfg.fov, 1, 0.01, 50);
+  const dir = normalized(cfg.cameraDir);
+  const distance = cfg.eyeR / table.header.groundRadiusKm;
+  camera.position.set(dir[0] * distance, dir[1] * distance, dir[2] * distance);
+  camera.lookAt(0, 0, 0);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
+  return camera;
+}
+
+function eyeLocalKm(camera, table) {
+  return camera.position.toArray().map(v => v * table.header.groundRadiusKm);
+}
+
+function groundColorGlsl() {
+  return `
+    vec3 n = normalize(vAtmLocalPos);
+    vec3 ground = vec3(
+      0.18 + 0.22 * n.x,
+      0.17 + 0.20 * n.y,
+      0.19 + 0.18 * n.z
+    );
+  `;
+}
+
+function makeGlslInjectMaterial(table, camera, injectGlsl) {
+  const uniforms = makeGlslSamplingUniforms(table);
+  Object.assign(uniforms, {
+    uAtmKmPerUnit: { value: table.header.groundRadiusKm },
+    uAtmEyeLocalKm: { value: new THREE.Vector3(...eyeLocalKm(camera, table)) },
+    uAtmSunDirLocal: { value: new THREE.Vector3(...cfg.fixedSun) },
+    uAtmSunIrradiance: { value: new THREE.Vector3(...cfg.irradiance) },
+    uAtmDebugMode: { value: debugMode }
+  });
+  return new THREE.ShaderMaterial({
+    name: "P4 atmosphere inject GLSL reference",
+    uniforms,
+    vertexShader: /* glsl */`
+      varying vec3 vAtmLocalPos;
+      void main() {
+        vAtmLocalPos = position;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: /* glsl */`
+      varying vec3 vAtmLocalPos;
+      uniform float uAtmKmPerUnit;
+      uniform vec3 uAtmEyeLocalKm;
+      uniform vec3 uAtmSunDirLocal;
+      uniform float uAtmDebugMode;
+      ${compositePrelude()}
+      void main() {
+        ${groundColorGlsl()}
+        gl_FragColor = vec4(ground, 1.0);
+        ${injectGlsl}
+      }
+    `
+  });
+}
+
+function makeTslInjectMaterial(table, camera) {
+  const sampling = makeTslSampling(table);
+  const composite = createAtmComposite({
+    sampling,
+    sunIrradiance: cfg.irradiance,
+    eyeLocalKm: eyeLocalKm(camera, table),
+    sunDirLocal: cfg.fixedSun,
+    kmPerUnit: table.header.groundRadiusKm,
+    debugMode
+  });
+  const material = new MeshBasicNodeMaterial({ name: "P4 atmosphere inject TSL" });
+  material.colorNode = Fn(() => {
+    const localPos = positionGeometry.toVar("p4bInjectLocalPos");
+    const n = normalize(localPos).toVar("p4bInjectNormal");
+    const ground = vec3(
+      float(0.18).add(n.x.mul(0.22)),
+      float(0.17).add(n.y.mul(0.20)),
+      float(0.19).add(n.z.mul(0.18))
+    ).toVar("p4bInjectGround");
+    return composite.atmCompositeLocalOutput(localPos, vec4(ground, float(1.0)));
+  })();
+  return material;
+}
+
+function skyFrame(camera) {
+  const p = camera.projectionMatrix.elements;
+  const rayScale = [
+    Math.abs(p[0]) > 1e-12 ? 1 / p[0] : 0,
+    Math.abs(p[5]) > 1e-12 ? 1 / p[5] : 0
+  ];
+  const Matrix3Class = impl === "glsl" ? THREE.Matrix3 : NodeMatrix3;
+  const viewToLocal = new Matrix3Class().setFromMatrix4(camera.matrixWorld);
+  return { rayScale, viewToLocal };
+}
+
+function makeGlslSkyMaterial(table, camera, skyVertexGlsl) {
+  const { rayScale, viewToLocal } = skyFrame(camera);
+  const uniforms = makeGlslSamplingUniforms(table);
+  Object.assign(uniforms, {
+    uAtmEyeLocalKm: { value: new THREE.Vector3(...eyeLocalKm(camera, table)) },
+    uAtmRayScale: { value: new THREE.Vector2(...rayScale) },
+    uAtmViewToLocal: { value: viewToLocal },
+    uAtmSunDirLocal: { value: new THREE.Vector3(...cfg.fixedSun) },
+    uAtmSunIrradiance: { value: new THREE.Vector3(...cfg.irradiance.map(v => v * cfg.skyIrradianceScale)) },
+    uAtmSkyDebug: { value: debugMode > 0 ? 1 : 0 }
+  });
+  return new THREE.ShaderMaterial({
+    name: "P4 atmosphere sky GLSL reference",
+    uniforms,
+    vertexShader: skyVertexGlsl,
+    fragmentShader: "precision highp sampler3D;\n" +
+      globalThis.ATM_SAMPLING_GLSL +
+      globalThis.ATM_SKY_FRAGMENT_GLSL,
+    transparent: false,
+    depthWrite: true,
+    depthTest: true,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+    fog: false
+  });
+}
+
+function makeTslSkyMaterial(table, camera) {
+  const { rayScale, viewToLocal } = skyFrame(camera);
+  const sampling = makeTslSampling(table);
+  const composite = createAtmComposite({
+    sampling,
+    // The sky view uses a larger test irradiance purely as an output
+    // encoding: the shader's multiplication by this uniform is the
+    // production operation, and the unscaled sky values occupy only a
+    // few 8-bit codes in a linear screenshot.
+    sunIrradiance: cfg.irradiance.map(v => v * cfg.skyIrradianceScale),
+    eyeLocalKm: eyeLocalKm(camera, table),
+    sunDirLocal: cfg.fixedSun,
+    rayScale,
+    viewToLocal,
+    skyDebug: debugMode > 0 ? 1 : 0
+  });
+  const material = new MeshBasicNodeMaterial({
+    name: "P4 atmosphere sky TSL",
+    transparent: false,
+    depthWrite: true,
+    depthTest: true,
+    side: NodeDoubleSide,
+    toneMapped: false,
+    fog: false
+  });
+  // The production sky vertex shader forms (projection * modelView) *
+  // position and passes that same value as the varying. Use the same
+  // association here; the default node vertex path projects the view-space
+  // position in a second step.
+  material.vertexNode = cameraProjectionMatrix
+    .mul(modelViewMatrix)
+    .mul(vec4(positionGeometry, float(1.0)));
+  material.colorNode = Fn(() => composite.atmSkyOutput(clipSpace))();
+  return material;
+}
+
+try {
+  await loadClassic("../src/render/atmosphere/atm-tables.js");
+  await loadClassic("../src/shaders/atm-sampling.glsl.js");
+  await loadClassic("../src/shaders/planet-atmosphere-composite.glsl.js");
+  const compositeSource = await loadText("../src/shaders/planet-atmosphere-composite.glsl.js");
+  const injectGlsl = extractTemplate(compositeSource, "ATM_INJECT_GLSL");
+  const skyVertexGlsl = extractTemplate(compositeSource, "ATM_SKY_VERTEX_GLSL");
+
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  if (typeof renderer.setClearColor === "function") renderer.setClearColor(0x000000, 1);
+
+  const table = await globalThis.loadAtmTable(
+    impl === "tsl" ? NodeTHREE : THREE,
+    "earth",
+    { url: "../assets/atmosphere/earth.atm.gz" }
+  );
+
+  let scene, camera, mesh, material, geometry;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    if (view === "composite") {
+      camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+      camera.position.z = 1;
+      material = makeGlslCompositeMaterial(table);
+      geometry = new THREE.PlaneGeometry(2, 2);
+    } else {
+      camera = makePerspectiveCamera(table);
+      if (view === "inject") {
+        material = makeGlslInjectMaterial(table, camera, injectGlsl);
+        geometry = new THREE.SphereGeometry(1, 128, 64);
+      } else {
+        material = makeGlslSkyMaterial(table, camera, skyVertexGlsl);
+        geometry = new THREE.SphereGeometry(
+          table.header.topRadiusKm / table.header.groundRadiusKm, 128, 64);
+      }
+    }
+    mesh = new THREE.Mesh(geometry, material);
+  } else {
+    scene = new NodeScene();
+    if (view === "composite") {
+      camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+      camera.position.z = 1;
+      material = makeTslCompositeMaterial(table);
+      geometry = new NodePlaneGeometry(2, 2);
+    } else {
+      camera = makePerspectiveCamera(table);
+      if (view === "inject") {
+        material = makeTslInjectMaterial(table, camera);
+        geometry = new NodeSphereGeometry(1, 128, 64);
+      } else {
+        material = makeTslSkyMaterial(table, camera);
+        geometry = new NodeSphereGeometry(
+          table.header.topRadiusKm / table.header.groundRadiusKm, 128, 64);
+      }
+    }
+    mesh = new NodeMesh(geometry, material);
+  }
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+
+  let renderFrame = () => renderer.render(scene, camera);
+  if (impl === "glsl" && view !== "composite") {
+    // The legacy seam's primary WebGL configuration always creates an MSAA
+    // canvas. That would make this a comparison of two antialiasing sample
+    // patterns at the sphere silhouette, not of the atmosphere shaders.
+    // Render the GLSL sphere views into a one-sample target and copy its
+    // texels to the canvas; the TSL side is created without MSAA above.
+    const target = new THREE.WebGLRenderTarget(size, size, {
+      samples: 0,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: true
+    });
+    target.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    const copyScene = new THREE.Scene();
+    const copyCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const copyMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTex: { value: target.texture },
+        uSize: { value: size }
+      },
+      vertexShader: "void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }",
+      fragmentShader: `
+        uniform sampler2D uTex;
+        uniform float uSize;
+        void main() {
+          gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uSize);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false
+    });
+    const copyMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), copyMaterial);
+    copyMesh.frustumCulled = false;
+    copyScene.add(copyMesh);
+    renderFrame = () => {
+      renderer.setRenderTarget(target);
+      renderer.clear();
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      renderer.render(copyScene, copyCamera);
+    };
+  }
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderFrame();
+  }
+
+  window.__p4bDebug = { renderer, scene, camera, mesh, material };
+  window.__p4b = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    view,
+    caseIndex,
+    debugMode,
+    header: table.header,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    geometryType: geometry.type,
+    cameraPosition: camera.position.toArray(),
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P4 atmosphere composite ${view} ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(renderFrame);
+} catch (e) {
+  window.__p4b = {
+    done: true,
+    error: String(e?.stack || e),
+    revision: REVISION,
+    impl,
+    view,
+    caseIndex,
+    debugMode
+  };
+  status.textContent = "P4 atmosphere composite error: " + window.__p4b.error;
+}
+</script>
+</body>
+</html>

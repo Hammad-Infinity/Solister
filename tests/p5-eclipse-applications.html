@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e20 — eclipse applications GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e20 eclipse-applications starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  createEarthEclipse,
+  createEarthCloudCoverage,
+  deriveEarthEclipseInstall
+} from "../src/shaders/eclipse.tsl.js";
+import {
+  createMoonEarthShadow,
+  deriveMoonEarthShadowInstall
+} from "../src/shaders/moon-shadow.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { cameraPosition, clamp, dot, exp2, float, normalize, output, positionWorld, texture, uv, vec3, vec4 } from "three/tsl";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshStandardNodeMaterial,
+  MeshPhysicalNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  DirectionalLight as NodeDirectionalLight,
+  DoubleSide as NodeDoubleSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// The installEarthEclipse / moon-shadow applications against
+// the TSL factories. Production ships these installers as
+// page-global classic scripts (bootstrap.js loads them into
+// one shared scope); this page assembles the same scope —
+// cloud-medium.glsl.js, the eclipseUniforms/ECLIPSE_GLSL
+// slice of state.js extracted verbatim at runtime,
+// eclipse.glsl.js, moon-shadow.glsl.js — then runs the real
+// setupMaterialEffects() and updateEarthEclipse() over stub
+// bodies, with the frame loop's cloud-shadow and
+// inside-shell writes mirrored as inputs. So every install
+// decision and uniform value on the classic side is
+// production-computed, and the derivations are checked
+// bit-exact against the live objects in page. The node side
+// composes the factories' factors onto node materials over
+// identical stub geometry. Lighting is a single
+// directional light with no ambient/environment/emissive,
+// so outgoing light is exactly the direct terms the
+// classic splices scale; where production zeroes or spares
+// the specular term, the proof materials null it the same
+// way on both sides (documented per subject below).
+// Subjects (one per case): the Earth surface material
+// (eclipse + day mask + deck ground shadow), the
+// cloud-coverage shell (deck medium alpha + eclipse +
+// below-horizon sun chord), the Moon (Earth-cylinder
+// shadow on direct diffuse only).
+// Cases:
+//   0 surface: partial eclipse + deck ground shadow (r)
+//   1 surface: total eclipse, ground shadow gated off
+//   2 surface: side terminator, ground shadow (alpha)
+//   3 cloud: outside view, partial eclipse, deck drift
+//   4 cloud: inside view, below-horizon sun, alpha mask
+//   5 moon: fully inside the Earth shadow cylinder
+//   6 moon: disc straddling the cylinder edge
+const NEAR = 0.1;
+const FAR = 5000;
+const FOV = 40;
+const EARTH_R = 10;
+const DECK_R = 10.05;
+const MOON_R = 2.7;
+const SUN_R = 12;
+const CASES = [
+  { kind: "surface-partial-eclipse", subject: "surface", sun: [50, 20, 255], Eclipse: [14.6, 3.4, 44], earthRotY: 0.4, shadowStrength: 0.65, shadowUseAlpha: 0, camera: [0, 3, 30], lookAt: [0, 0, 0] },
+  { kind: "surface-total-eclipse", subject: "surface", sun: [50, 20, 255], Eclipse: [8.6, 3.4, 44], earthRotY: 0, shadowStrength: 0, shadowUseAlpha: 0, camera: [0, 3, 30], lookAt: [0, 0, 0] },
+  { kind: "surface-terminator-alpha", subject: "surface", sun: [240, 15, 60], Eclipse: [-40, 0, -30], earthRotY: 0.9, shadowStrength: 0.65, shadowUseAlpha: 1, camera: [0, 3, 30], lookAt: [0, 0, 0] },
+  { kind: "cloud-outside-eclipse", subject: "cloud", sun: [90, 50, 210], Eclipse: [20.6, 8.7, 36.5], earthRotY: 0.3, maskUsesAlpha: 0, deckShiftMid: [0.06, -0.03], deckShiftHigh: [-0.11, 0.02], camera: [0, 4, 30], lookAt: [0, 0, 0] },
+  { kind: "cloud-inside-below-horizon", subject: "cloud", light: 12, sun: [-40, 15, -190], Eclipse: [-60, 20, -80], earthRotY: -0.628, maskUsesAlpha: 1, deckShiftMid: [-0.04, 0.05], deckShiftHigh: [0.09, -0.01], camera: [0, 0.5, 1], lookAt: [0, 0, 20] },
+  { kind: "moon-in-shadow", subject: "moon", light: 16, earth: [-30, 0, -40], Eclipse: [-37.2, 0, -49.6] },
+  { kind: "moon-straddle", subject: "moon", earth: [-30, 0, -40], Eclipse: [-30, 0, -55] }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5eap = { done: false, error: null };
+
+function loadClassic(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = () => resolve();
+    el.onerror = () => reject(new Error("classic script failed: " + src));
+    document.head.appendChild(el);
+  });
+}
+
+function loadBlob(text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/javascript" }));
+  return loadClassic(url).finally(() => URL.revokeObjectURL(url));
+}
+
+// Assemble production's classic-script scope for the two
+// installers, exactly as bootstrap.js orders it.
+async function loadProductionScope() {
+  globalThis.THREE = THREE;
+  await loadClassic("../src/shaders/cloud-medium.glsl.js");
+  const stateText = await (await fetch("../src/app/state.js")).text();
+  const i0 = stateText.indexOf("const eclipseUniforms");
+  const i1 = stateText.indexOf("const ECLIPSE_GLSL");
+  const i2 = stateText.indexOf("`;", i1);
+  if (i0 < 0 || i1 < 0 || i2 < 0) throw new Error("state.js eclipse anchors missing");
+  const slice = stateText.slice(i0, i2 + 2);
+  if (!slice.includes("solarVisibility") || !slice.includes("uCloudShadowStrength"))
+    throw new Error("state.js eclipse extract incomplete");
+  await loadBlob(slice);
+  await loadClassic("../src/shaders/eclipse.glsl.js");
+  await loadClassic("../src/shaders/moon-shadow.glsl.js");
+  return {
+    eclipseUniforms: (0, eval)("eclipseUniforms"),
+    extinction: (0, eval)("CLOUD_EXTINCTION_PER_KM"),
+    installEarthEclipse: globalThis.installEarthEclipse,
+    setupMaterialEffects: globalThis.setupMaterialEffects,
+    updateEarthEclipse: globalThis.updateEarthEclipse
+  };
+}
+
+function makeSurfaceTexture(T) {
+  const w = 256, h = 128;
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const u = x / w, v = y / h;
+      const land = Math.sin(u * 19.0 + Math.sin(v * 9.0) * 2.0) * Math.cos(v * 13.0 - u * 4.0) > 0.05;
+      const p = (y * w + x) * 4;
+      data[p] = land ? 96 + ((x * 7 + y * 3) % 60) : 30 + ((x + y) % 25);
+      data[p + 1] = land ? 130 + ((x * 3 + y * 5) % 70) : 70 + ((x * 2) % 30);
+      data[p + 2] = land ? 60 : 150 + ((y * 4) % 60);
+      data[p + 3] = 235 + ((x * 11 + y * 7) % 21) - 10;
+    }
+  }
+  const tex = new T.DataTexture(data, w, h, T.RGBAFormat);
+  tex.wrapS = T.RepeatWrapping;
+  tex.wrapT = T.ClampToEdgeWrapping;
+  tex.colorSpace = T.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Deck texture: three etage channels deliberately distinct,
+// alpha its own pattern (the maskUseAlpha discriminator).
+function makeDeckTexture(T, withOffset) {
+  const w = 256, h = 128;
+  const data = new Uint8Array(w * h * 4);
+  const blob = (u, v, cu, cv, r) => {
+    const du = Math.min(Math.abs(u - cu), 1 - Math.abs(u - cu));
+    const dv = v - cv;
+    return Math.max(0, 1 - Math.sqrt(du * du * 3.0 + dv * dv) / r);
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const u = x / w, v = y / h;
+      const rC = Math.max(blob(u, v, 0.30, 0.45, 0.22), blob(u, v, 0.72, 0.60, 0.16) * 0.8, blob(u, v, 0.55, 0.25, 0.10) * 0.6);
+      const gC = Math.max(blob(u, v, 0.45, 0.55, 0.18), blob(u, v, 0.15, 0.30, 0.12) * 0.7);
+      const bC = Math.max(0, Math.sin(u * 28.0 + v * 6.0)) * 0.5 * blob(u, v, 0.5, 0.5, 0.45);
+      const aC = Math.max(blob(u, v, 0.62, 0.40, 0.20), blob(u, v, 0.25, 0.65, 0.14) * 0.85, 0.4 * rC);
+      const p = (y * w + x) * 4;
+      data[p] = Math.round(255 * rC);
+      data[p + 1] = Math.round(255 * gC);
+      data[p + 2] = Math.round(255 * bC);
+      data[p + 3] = Math.round(255 * aC);
+    }
+  }
+  const tex = new T.DataTexture(data, w, h, T.RGBAFormat);
+  tex.wrapS = T.RepeatWrapping;
+  tex.wrapT = T.ClampToEdgeWrapping;
+  tex.minFilter = T.LinearMipmapLinearFilter;
+  tex.magFilter = T.LinearFilter;
+  tex.generateMipmaps = true;
+  if (withOffset) tex.offset.set(0.25, 0);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeMoonTexture(T) {
+  const w = 128, h = 64;
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const n = ((x * 73856093) ^ (y * 19349663)) % 97;
+      const base = 120 + (n % 70) + Math.round(30 * Math.sin(x * 0.35) * Math.cos(y * 0.5));
+      const p = (y * w + x) * 4;
+      data[p] = base; data[p + 1] = base - 6; data[p + 2] = base - 14; data[p + 3] = 255;
+    }
+  }
+  const tex = new T.DataTexture(data, w, h, T.RGBAFormat);
+  tex.wrapS = T.RepeatWrapping;
+  tex.wrapT = T.ClampToEdgeWrapping;
+  tex.colorSpace = T.SRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Stub registry + production installs, classic namespace,
+// identical on both pages.
+function buildSystem(scope) {
+  const scene = new THREE.Scene();
+  const surfaceTex = makeSurfaceTexture(THREE);
+  const deckTex = makeDeckTexture(THREE, true);
+  const saturn = new THREE.Mesh(
+    new THREE.SphereGeometry(9, 16, 12), new THREE.MeshStandardMaterial());
+  const saturnRing = new THREE.Mesh(
+    new THREE.RingGeometry(12, 22, 32, 1), new THREE.MeshStandardMaterial());
+  const earth = new THREE.Mesh(
+    new THREE.SphereGeometry(EARTH_R, 64, 48),
+    new THREE.MeshStandardMaterial({ map: surfaceTex, roughness: 0.55, metalness: 0 }));
+  const moon = new THREE.Mesh(
+    new THREE.SphereGeometry(MOON_R, 48, 32),
+    new THREE.MeshPhongMaterial({
+      map: makeMoonTexture(THREE),
+      specular: new THREE.Color(0, 0, 0), shininess: 0
+    }));
+  const sun = new THREE.Mesh(
+    new THREE.SphereGeometry(SUN_R, 16, 12), new THREE.MeshBasicMaterial());
+  const cloudMat = new THREE.MeshStandardMaterial({
+    map: deckTex, transparent: true, opacity: 0.95, depthWrite: false,
+    roughness: 1, metalness: 0, side: THREE.DoubleSide, forceSinglePass: true
+  });
+  cloudMat.userData.earthCloudCoverage = true;
+  cloudMat.userData.uCloudShell = { value: new THREE.Vector2(6387, 6382) };
+  cloudMat.userData.uCloudExtinction = { value: scope.extinction };
+  cloudMat.userData.uDeckShiftMid = { value: new THREE.Vector2(...(cfg.deckShiftMid || [0, 0])) };
+  cloudMat.userData.uDeckShiftHigh = { value: new THREE.Vector2(...(cfg.deckShiftHigh || [0, 0])) };
+  cloudMat.userData.uEarthCloudMaskUsesAlpha = { value: cfg.maskUsesAlpha || 0 };
+  const cloud = new THREE.Mesh(new THREE.SphereGeometry(DECK_R, 64, 48), cloudMat);
+  for (const m of [saturn, saturnRing, earth, moon, sun, cloud]) scene.add(m);
+  globalThis.objectRegistry = { saturn, "saturn-ring": saturnRing, earth, moon, sun };
+  globalThis.cloudMeshes = { earth: cloud };
+  globalThis.bodyOnScreen = () => true;
+  return { scene, saturn, saturnRing, earth, moon, sun, cloud, surfaceTex, deckTex };
+}
+
+// Position the stubs for this case, then production's
+// per-frame eclipse write + the frame-loop cloud-shadow
+// and inside-shell writes (mirrored as inputs).
+function driveCase(sys, scope, camera) {
+  const { earth, moon, sun, cloud } = sys;
+  if (cfg.subject === "moon") {
+    earth.position.set(...cfg.earth);
+    moon.position.set(...cfg.Eclipse);
+    sun.position.set(0, 0, 0);
+  } else {
+    earth.position.set(0, 0, 0);
+    earth.rotation.y = cfg.earthRotY || 0;
+    cloud.rotation.y = cfg.earthRotY || 0;
+    moon.position.set(...cfg.Eclipse);
+    sun.position.set(...cfg.sun);
+  }
+  sys.scene.updateMatrixWorld(true);
+  scope.updateEarthEclipse();
+  const EU = scope.eclipseUniforms;
+  EU.uCloudShadowMap.value = sys.deckTex;
+  const inv = new THREE.Matrix4().copy(earth.matrixWorld).invert();
+  const cloudWorld = cloud.getWorldPosition(new THREE.Vector3());
+  EU.uCloudShadowSunLocal.value.copy(sun.position).sub(cloudWorld).transformDirection(inv);
+  EU.uCloudShadowUvOffset.value.set(
+    sys.deckTex.offset.x - (sys.surfaceTex.offset.x || 0),
+    sys.deckTex.offset.y - (sys.surfaceTex.offset.y || 0));
+  EU.uCloudShadowUseAlpha.value = cfg.shadowUseAlpha || 0;
+  EU.uCloudShadowStrength.value = cfg.shadowStrength || 0;
+  moon.material.userData.uEarthPos.value.copy(earth.position);
+  const inside = camera.position.length() < DECK_R ? 1 : 0;
+  if (cloud.material.userData.uEarthCloudInsideShell)
+    cloud.material.userData.uEarthCloudInsideShell.value = inside;
+  return inside;
+}
+
+// Derivation bit-exactness, in page, against production's
+// live objects: initial uniform values, installer-created
+// userData defaults on fresh materials, cache keys, and
+// the moon's prepared uniform slots.
+function checkDerivations(scope, sys) {
+  const EU = scope.eclipseUniforms;
+  const surf = deriveEarthEclipseInstall({ earthCloudCoverage: false });
+  const cld = deriveEarthEclipseInstall({ earthCloudCoverage: true });
+  const v3eq = (v, a) => v.x === a[0] && v.y === a[1] && v.z === a[2];
+  let ok =
+    v3eq(EU.uEarthCenter.value, surf.uniforms.earthCenter) &&
+    v3eq(EU.uEclipseMoon.value, surf.uniforms.Eclipse) &&
+    v3eq(EU.uEclipseSun.value, surf.uniforms.sun) &&
+    EU.uEclipseMoonRadius.value === surf.uniforms.EclipseRadius &&
+    EU.uEclipseSunRadius.value === surf.uniforms.sunRadius &&
+    v3eq(EU.uCloudShadowSunLocal.value, surf.uniforms.cloudShadowSunLocal) &&
+    EU.uCloudShadowUvOffset.value.x === surf.uniforms.cloudShadowUvOffset[0] &&
+    EU.uCloudShadowUvOffset.value.y === surf.uniforms.cloudShadowUvOffset[1] &&
+    EU.uCloudShadowUseAlpha.value === surf.uniforms.cloudShadowUseAlpha &&
+    EU.uCloudShadowStrength.value === surf.uniforms.cloudShadowStrength &&
+    surf.cloud === null && cld.cloud !== null;
+  const freshSurface = new THREE.MeshStandardMaterial();
+  scope.installEarthEclipse(freshSurface);
+  ok = ok && freshSurface.customProgramCacheKey() === surf.cacheKey &&
+    freshSurface.userData.eclipseInstalled === true;
+  const freshCloud = new THREE.MeshStandardMaterial();
+  freshCloud.userData.earthCloudCoverage = true;
+  scope.installEarthEclipse(freshCloud);
+  const fu = freshCloud.userData;
+  ok = ok && freshCloud.customProgramCacheKey() === cld.cacheKey &&
+    fu.uEarthCloudMaskUsesAlpha.value === cld.cloud.maskUsesAlpha &&
+    fu.uEarthCloudInsideShell.value === cld.cloud.insideShell &&
+    fu.uCloudShell.value.x === cld.cloud.shell[0] &&
+    fu.uCloudShell.value.y === cld.cloud.shell[1] &&
+    fu.uCloudExtinction.value === cld.cloud.extinction &&
+    fu.uDeckShiftMid.value.x === cld.cloud.deckShiftMid[0] &&
+    fu.uDeckShiftHigh.value.y === cld.cloud.deckShiftHigh[1];
+  const moonInstall = deriveMoonEarthShadowInstall({ earthRadius: EARTH_R });
+  ok = ok &&
+    sys.moon.material.userData.uEarthRadius.value === moonInstall.earthRadius &&
+    v3eq(sys.moon.material.userData.uEarthPos.value, moonInstall.earthPos);
+  if (!ok) throw new Error("derivation mismatch (see p5-eclipse-applications checks)");
+}
+
+function makeClassicCamera() {
+  const camera = new THREE.PerspectiveCamera(FOV, 1, NEAR, FAR);
+  if (cfg.subject === "moon") {
+    const m = new THREE.Vector3(...cfg.Eclipse);
+    const dir = new THREE.Vector3(0.6, 0.25, 0.8).normalize();
+    camera.position.copy(m).addScaledVector(dir, 9);
+    camera.lookAt(m);
+  } else {
+    camera.position.set(...cfg.camera);
+    camera.lookAt(...cfg.lookAt);
+  }
+  camera.updateProjectionMatrix();
+  camera.updateWorldMatrix(true, false);
+  return camera;
+}
+
+function lightFor(NS) {
+  const LightCls = NS === THREE ? THREE.DirectionalLight : NodeDirectionalLight;
+  const light = new LightCls(0xffffff, cfg.light ?? 3.2);
+  if (cfg.subject === "moon") {
+    light.position.set(0, 0, 0);
+    light.target.position.set(...cfg.Eclipse);
+  } else {
+    light.position.set(...cfg.sun);
+    light.target.position.set(0, 0, 0);
+  }
+  return light;
+}
+
+function buildGlslScene(sys, camera) {
+  const scene = sys.scene;
+  for (const m of [sys.saturn, sys.saturnRing, sys.earth, sys.moon, sys.sun, sys.cloud])
+    m.visible = false;
+  if (cfg.subject === "surface") sys.earth.visible = true;
+  if (cfg.subject === "cloud") sys.cloud.visible = true;
+  if (cfg.subject === "moon") sys.moon.visible = true;
+  const light = lightFor(THREE);
+  scene.add(light); scene.add(light.target);
+  return { scene, camera };
+}
+
+function buildTslScene(sys, scope, inside) {
+  const scene = new NodeScene();
+  const camera = new NodePerspectiveCamera(FOV, 1, NEAR, FAR);
+  const classicCam = makeClassicCamera();
+  camera.position.copy(classicCam.position);
+  camera.quaternion.copy(classicCam.quaternion);
+  camera.updateProjectionMatrix();
+  scene.add(camera);
+  const light = lightFor(NodeNS);
+  scene.add(light); scene.add(light.target);
+
+  const EU = scope.eclipseUniforms;
+  const v3 = v => new NodeNS.Vector3(v.x, v.y, v.z);
+  const eclipseSet = {
+    earthCenter: v3(EU.uEarthCenter.value),
+    sunPosition: v3(EU.uEclipseSun.value),
+    Eclipse: v3(EU.uEclipseMoon.value),
+    sunRadius: EU.uEclipseSunRadius.value,
+    EclipseRadius: EU.uEclipseMoonRadius.value
+  };
+
+  if (cfg.subject === "surface") {
+    const slots = createEarthEclipse({
+      ...eclipseSet,
+      cloudShadowMap: makeDeckTexture(NodeNS, false),
+      cloudShadowSunLocal: v3(EU.uCloudShadowSunLocal.value),
+      cloudShadowUvOffset: EU.uCloudShadowUvOffset.value.toArray(),
+      cloudShadowUseAlpha: EU.uCloudShadowUseAlpha.value,
+      cloudShadowStrength: EU.uCloudShadowStrength.value
+    });
+    const sample = texture(makeSurfaceTexture(NodeNS)).sample(uv());
+    const material = new MeshStandardNodeMaterial({ name: "P5e20 earth surface TSL" });
+    material.roughness = 0.55;
+    material.metalness = 0;
+    material.colorNode = vec4(
+      sample.rgb.mul(slots.diffuseScale),
+      sample.a.mul(slots.diffuseAlphaScale));
+    const visibility = slots.earthEclipseVisibility(positionWorld);
+    material.outputNode = vec4(output.rgb.mul(visibility), output.a);
+    const mesh = new NodeMesh(new NodeSphereGeometry(EARTH_R, 64, 48), material);
+    mesh.rotation.y = cfg.earthRotY || 0;
+    mesh.updateWorldMatrix(true, false);
+    scene.add(mesh);
+  } else if (cfg.subject === "cloud") {
+    sys.deckTex.updateMatrix();
+    const slots = createEarthCloudCoverage({
+      ...eclipseSet,
+      map: makeDeckTexture(NodeNS, false),
+      mapTransform: new NodeNS.Matrix3().fromArray(sys.deckTex.matrix.elements),
+      maskUsesAlpha: sys.cloud.material.userData.uEarthCloudMaskUsesAlpha.value,
+      insideShell: inside,
+      cloudShell: sys.cloud.material.userData.uCloudShell.value.toArray(),
+      cloudExtinction: sys.cloud.material.userData.uCloudExtinction.value,
+      deckShiftMid: sys.cloud.material.userData.uDeckShiftMid.value.toArray(),
+      deckShiftHigh: sys.cloud.material.userData.uDeckShiftHigh.value.toArray()
+    });
+    const material = new MeshPhysicalNodeMaterial({ name: "P5e20 earth cloud TSL" });
+    material.transparent = true;
+    material.depthWrite = false;
+    material.side = NodeDoubleSide;
+    material.forceSinglePass = true;
+    material.roughness = 1;
+    material.metalness = 0;
+    material.specularIntensity = 0;
+    material.colorNode = vec4(slots.diffuseColor, 1.0);
+    material.opacityNode = slots.alphaFactor.mul(0.95);
+    const member = (node, name) => typeof node.get === "function" ? node.get(name) : node[name];
+    const unit = slots.earthCloudEclipseApplyAtPositionWorld(vec3(1.0), vec3(1.0), vec3(1.0));
+    // Base-material bridge (rig device, not part of the port):
+    // production's deck is a MeshStandardMaterial, whose direct
+    // diffuse carries three's glTF fresnel_mix factor (1 - F) with
+    // F0 = 0.04, F90 = 1. This proof material is physical with
+    // specularIntensity 0 so its specular output is exactly the
+    // zero production's splice writes -- but that also sends its
+    // F to 0, dropping the (1 - F) diffuse attenuation. Folding
+    // classic Standard's (1 - F) for the one directional light
+    // back in makes the unmodified outgoing terms identical, so
+    // what remains under comparison is the factory's own factor.
+    const lightDirWorld = normalize(vec3(cfg.sun[0], cfg.sun[1], cfg.sun[2]));
+    const viewDirWorld = normalize(cameraPosition.sub(positionWorld));
+    const halfDirWorld = normalize(lightDirWorld.add(viewDirWorld));
+    const dotVH = clamp(dot(viewDirWorld, halfDirWorld), 0.0, 1.0);
+    const fresnel = exp2(float(-5.55473).mul(dotVH).sub(6.98316).mul(dotVH));
+    const fresnelMix = float(1.0).sub(float(0.04).mul(float(1.0).sub(fresnel)).add(fresnel));
+    material.outputNode = vec4(
+      output.rgb.mul(member(unit, "directDiffuse").x).mul(fresnelMix), output.a);
+    const mesh = new NodeMesh(new NodeSphereGeometry(DECK_R, 64, 48), material);
+    mesh.rotation.y = cfg.earthRotY || 0;
+    mesh.updateWorldMatrix(true, false);
+    scene.add(mesh);
+  } else {
+    const slots = createMoonEarthShadow({
+      earthPos: v3(sys.moon.material.userData.uEarthPos.value),
+      earthRadius: sys.moon.material.userData.uEarthRadius.value
+    });
+    const material = new MeshPhysicalNodeMaterial({ name: "P5e20 moon TSL" });
+    material.map = makeMoonTexture(NodeNS);
+    material.roughness = 1;
+    material.metalness = 0;
+    material.specularIntensity = 0;
+    const unit = slots.moonEarthShadowApplyAtPositionWorld(vec3(1.0));
+    material.outputNode = vec4(output.rgb.mul(unit.x), output.a);
+    const mesh = new NodeMesh(new NodeSphereGeometry(MOON_R, 48, 32), material);
+    mesh.position.set(...cfg.Eclipse);
+    mesh.updateWorldMatrix(true, false);
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+try {
+  const scope = await loadProductionScope();
+  const sys = buildSystem(scope);
+  scope.setupMaterialEffects();
+  checkDerivations(scope, sys);
+  const classicCamera = makeClassicCamera();
+  const inside = driveCase(sys, scope, classicCamera);
+
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl"
+    ? buildGlslScene(sys, classicCamera)
+    : buildTslScene(sys, scope, inside);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5eap = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e20 eclipse-applications ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5eap = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e20 eclipse-applications error: " + window.__p5eap.error;
+}
+</script>
+</body>
+</html>

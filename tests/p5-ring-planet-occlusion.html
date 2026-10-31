@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c17 — ring planet occlusion GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 296px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="384" height="288"></canvas>
+<div id="status">P5c17 ring planet occlusion starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  createRingPlanetOcclusion,
+  deriveRingPlanetOcclusionInstall
+} from "../src/shaders/ring-planet-occlusion.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { select, vec4 } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const W = 384, H = 288;
+const canvas = document.getElementById("c");
+// Frame cases: a ring plane (XZ, 7x7, occluder radius 1 at the
+// origin) under four cameras -- saturn-like oblate occluder from a
+// typical view, spherical occluder at a grazing angle (wide
+// discriminant band), a rotated oblate occluder (invRot exercised),
+// and a close camera where much of the plane is nearer than the
+// body. Occluded fragments render red, visible ones green.
+const SATURN_AXES_KM = [60268, 60268, 54364];
+const CASES = [
+  { axesKm: SATURN_AXES_KM, eulerDeg: [0, 0, 0], cam: [2.6, 2.4, 4.6] },
+  { axesKm: null, eulerDeg: [0, 0, 0], cam: [5.5, 0.7, 1.5] },
+  { axesKm: SATURN_AXES_KM, eulerDeg: [20, 0, 35], cam: [0.5, 3.2, 4.2] },
+  { axesKm: null, eulerDeg: [0, 0, 0], cam: [1.35, 0.5, 0.9] }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5ringocc = { done: false, error: null };
+
+// Globals the classic production file reads, then the file itself
+// (so the derivation half below runs the real installer).
+window.THREE = THREE;
+window.BodyShapes = { axesKm: { saturn: SATURN_AXES_KM } };
+
+async function loadProductionParts() {
+  const text = await fetch("../src/shaders/ring-planet-occlusion.glsl.js").then(r => {
+    if (!r.ok) throw new Error("ring-planet-occlusion.glsl.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const at = text.indexOf("const RING_PLANET_OCCLUSION_GLSL = ");
+  const tick = text.indexOf(tickChar, at);
+  const end = text.indexOf(tickChar, tick + 1);
+  if (at < 0 || tick < 0 || end < 0) throw new Error("helper literal bounds not found");
+  const helper = Function("return " + text.slice(tick, end + 1))();
+  if (!helper.includes("bool ringPlanetOccluded(")) {
+    throw new Error("extracted literal is not the occlusion helper");
+  }
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "../src/shaders/ring-planet-occlusion.glsl.js";
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  if (typeof window.installRingPlanetOcclusion !== "function") {
+    throw new Error("production installer did not load");
+  }
+  return { helper };
+}
+
+// The installer-derivation half: real production installer on a
+// stub material vs deriveRingPlanetOcclusionInstall on the same
+// plain inputs (the planetKey -> axesKm lookup is the caller's,
+// exactly as production performs it against BodyShapes).
+function derivationCases() {
+  const specs = [
+    { name: "saturn-axes", radius: 1, occluder: { userData: { planetKey: "saturn" } } },
+    { name: "no-occluder", radius: 2.5, occluder: null },
+    { name: "keyless-occluder", radius: 0.75, occluder: { userData: {} } },
+    { name: "unknown-key", radius: 3, occluder: { userData: { planetKey: "ghost" } } }
+  ];
+  return specs.map((spec) => {
+    const material = { userData: {}, needsUpdate: false };
+    const uniforms = window.installRingPlanetOcclusion(
+      material, spec.radius, "rig-" + spec.name, spec.occluder);
+    const production = {
+      radius: uniforms.uOccRadius.value,
+      axes: uniforms.uOccAxes.value.toArray(),
+      polygonOffset: material.polygonOffset,
+      polygonOffsetFactor: material.polygonOffsetFactor,
+      polygonOffsetUnits: material.polygonOffsetUnits
+    };
+    const key = spec.occluder?.userData?.planetKey;
+    const der = deriveRingPlanetOcclusionInstall({
+      planetRadius: spec.radius,
+      axesKm: key ? window.BodyShapes.axesKm[key] : undefined
+    });
+    const tsl = {
+      radius: der.radius,
+      axes: der.axes,
+      ...der.materialParameters
+    };
+    return { name: spec.name, production, tsl };
+  });
+}
+
+function caseSetup() {
+  const der = deriveRingPlanetOcclusionInstall({
+    planetRadius: 1,
+    axesKm: cfg.axesKm || undefined
+  });
+  // updateRingOccluder's own lines: inverse world quaternion ->
+  // rotation matrix -> Matrix3.
+  const euler = new THREE.Euler(
+    ...cfg.eulerDeg.map(d => d * Math.PI / 180));
+  const quat = new THREE.Quaternion().setFromEuler(euler).invert();
+  const mat4 = new THREE.Matrix4().makeRotationFromQuaternion(quat);
+  const invRot = new THREE.Matrix3().setFromMatrix4(mat4);
+  return { axes: der.axes, radius: der.radius, invRot };
+}
+
+function makeGlslMaterial(parts, setup) {
+  return new THREE.ShaderMaterial({
+    name: "P5c17 ring planet occlusion GLSL reference",
+    uniforms: {
+      uOccCenter: { value: new THREE.Vector3(0, 0, 0) },
+      uOccRadius: { value: setup.radius },
+      uOccInvRot: { value: setup.invRot },
+      uOccAxes: { value: new THREE.Vector3(...setup.axes) }
+    },
+    vertexShader: `
+      varying vec3 vRingOccWorld;
+      void main() {
+        vRingOccWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec3 vRingOccWorld;
+      uniform vec3 uOccCenter;
+      uniform float uOccRadius;
+      uniform mat3 uOccInvRot;
+      uniform vec3 uOccAxes;
+      ${parts.helper}
+      void main() {
+        bool occ = ringPlanetOccluded(vRingOccWorld, cameraPosition, uOccCenter, uOccRadius, uOccInvRot, uOccAxes);
+        gl_FragColor = vec4(occ ? vec3(0.9, 0.15, 0.2) : vec3(0.1, 0.75, 0.3), 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial(setup) {
+  const material = new MeshBasicNodeMaterial({ name: "P5c17 ring planet occlusion TSL" });
+  const { occluded } = createRingPlanetOcclusion({
+    center: [0, 0, 0],
+    radius: setup.radius,
+    invRot: setup.invRot,
+    axes: setup.axes
+  });
+  material.colorNode = select(
+    occluded, vec4(0.9, 0.15, 0.2, 1.0), vec4(0.1, 0.75, 0.3, 1.0));
+  return material;
+}
+
+try {
+  const parts = await loadProductionParts();
+  const derivation = derivationCases();
+  const setup = caseSetup();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 100);
+    material = makeGlslMaterial(parts, setup);
+    const geo = new THREE.PlaneGeometry(7, 7);
+    geo.rotateX(-Math.PI / 2);
+    mesh = new THREE.Mesh(geo, material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(40, W / H, 0.01, 100);
+    material = makeTslMaterial(setup);
+    const geo = new NodePlaneGeometry(7, 7);
+    geo.rotateX(-Math.PI / 2);
+    mesh = new NodeMesh(geo, material);
+  }
+  camera.position.set(...cfg.cam);
+  camera.lookAt(0, 0, 0);
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5ringocc = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    width: W,
+    height: H,
+    caseShape: { axes: setup.axes, cam: cfg.cam },
+    derivation,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c17 ring planet occlusion ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5ringocc = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c17 ring planet occlusion error: " + window.__p5ringocc.error;
+}
+</script>
+</body>
+</html>

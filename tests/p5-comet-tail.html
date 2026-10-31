@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e15 — comet tail volume GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e15 comet-tail starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { COMET_OCCLUSION_SHADER } from "../src/bodies/small-bodies/comet-occlusion.js";
+import { createTailVolume, writeTailVolume } from "../src/bodies/small-bodies/comet-tail-volume.js";
+import { createCometOcclusion } from "../src/bodies/small-bodies/comet-occlusion.tsl.js";
+import { createCometTailVolume } from "../src/bodies/small-bodies/comet-tail-volume.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { vec4 } from "three/tsl";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  BackSide as NodeBackSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// Production's comet tail volume shader verbatim (extracted
+// from comet-tail-volume.js, its ${COMET_OCCLUSION_SHADER}
+// splice evaluated against the imported provider string,
+// COMET_ION_TAIL define per case) against the TSL port
+// (comet-tail-volume.tsl.js over the P5e13 occlusion
+// provider). All uniform VALUES are production-computed in
+// both pages: createTailVolume + writeTailVolume on a fixed
+// polyline, then one production onBeforeRender pass against
+// a shim renderer (full-canvas viewport, pixel ratio 1,
+// WebGL2 integer-mask capability, no stencil — so eye, the
+// ion kernel softening, the metric w rows, sunDirection,
+// localToClip and the screen-mask bitmask all take their
+// production values; the nucleus stub sits beyond the
+// 12-radii zoom guard so no depth prepass runs). The
+// occlusion uniforms are then overridden per case.
+// Cases:
+//   0 dust tail, screen mask on (tile candidate selection)
+//   1 dust tail, screen mask off (all-nodes path)
+//   2 dust tail clipped by three occluder spheres
+//   3 dust tail with nucleus depth (discard + ray clamp)
+//   4 ion tail (head clip + headDensity, softened kernel)
+//   5 ion tail, 8 segments, saturating opacity, no head
+//   6 dust tail against opaque scene spheres at 8/40 units
+//     (the written linear depth through the tail shader)
+const NEAR = 0.1;
+const FAR = 5000;
+const OCCLUDERS = [
+  [1.5, 0.15, -0.2, 0.55],
+  [0.3, -0.1, 0.35, 0.4],
+  [2.5, 0.6, 0.15, 0.7]
+];
+const BASE = {
+  ion: false, color: 0xd8b28a, segments: 24, flatten: 0.92,
+  opacity: 1.4, comaRadius: 0, sunWorld: [40, 15, 10],
+  meshPos: [-6, -1, -26], meshScale: 8, meshRotY: 0.15,
+  mask: true, count: 0, hasDepth: false, nucleusOpacity: 1,
+  depthRange: 3.0, viewport: [0, 0, 256, 256], spheres: false
+};
+const CASES = [
+  { ...BASE, kind: "dust-mask" },
+  { ...BASE, kind: "dust-mask-off", mask: false },
+  { ...BASE, kind: "dust-occluders", count: 3 },
+  { ...BASE, kind: "dust-nucleus", hasDepth: true, viewport: [40, 150, 150, 80] },
+  { ...BASE, kind: "ion-head", ion: true, color: 2912472, flatten: 1, opacity: 1.2, comaRadius: 0.45 },
+  { ...BASE, kind: "ion-saturated", ion: true, color: 2912472, flatten: 1, segments: 8, opacity: 3.2, sunWorld: [-10, 4, -80] },
+  { ...BASE, kind: "dust-depth-occluders", spheres: true }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5tail = { done: false, error: null };
+
+async function loadProductionShaders() {
+  const text = await fetch("../src/bodies/small-bodies/comet-tail-volume.js").then(r => {
+    if (!r.ok) throw new Error("comet-tail-volume.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  function literalOf(marker) {
+    const at = text.indexOf(marker);
+    const tick = text.indexOf(tickChar, at);
+    if (at < 0 || tick < 0) throw new Error("shader literal not found: " + marker);
+    let i = tick + 1;
+    for (;;) {
+      if (i >= text.length) throw new Error("unterminated literal: " + marker);
+      if (text[i] === "$" && text[i + 1] === "{") {
+        i = text.indexOf("}", i) + 1;
+        continue;
+      }
+      if (text[i] === tickChar && text[i - 1] !== "\\") break;
+      i++;
+    }
+    return text.slice(tick, i + 1);
+  }
+  const vertex = Function("return " + literalOf("const VERTEX_SHADER ="))();
+  const fragment = Function("COMET_OCCLUSION_SHADER",
+    "return " + literalOf("const FRAGMENT_SHADER ="))(COMET_OCCLUSION_SHADER);
+  if (!vertex.includes("vLocal = position")) throw new Error("extracted vertex does not look like production");
+  if (!fragment.includes("tailColumn") || !fragment.includes("usampler2D nodeMask"))
+    throw new Error("extracted fragment does not look like production");
+  return { vertex, fragment };
+}
+
+function makeCamera(isNode) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, NEAR, FAR);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  camera.updateMatrixWorld(true);
+  return camera;
+}
+
+// Asymmetric packed-depth test texture (same as the P5e13 rig).
+function makeDepthTexture(T) {
+  const w = 64, h = 64;
+  const data = new Uint8Array(w * h * 4).fill(255);
+  const cx = 20, cy = 44, r = 12;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < r) {
+        const p = (y * w + x) * 4;
+        data[p] = Math.max(0, Math.min(255, Math.round(120 + d * 10)));
+        data[p + 1] = (x * 7) % 251;
+        data[p + 2] = 77;
+        data[p + 3] = 200;
+      }
+    }
+  }
+  const tex = new T.DataTexture(data, w, h, T.RGBAFormat);
+  tex.minFilter = T.NearestFilter;
+  tex.magFilter = T.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// Runs production's tail factory + writer + one production
+// onBeforeRender (against the shim) and returns the
+// production mesh carrying final uniform values.
+function buildProductionTail() {
+  const sunObj = new THREE.Object3D();
+  sunObj.position.set(...cfg.sunWorld);
+  const registry = { sun: sunObj };
+  const nucleus = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 8, 6), new THREE.MeshBasicMaterial());
+  nucleus.position.set(...cfg.meshPos);
+  nucleus.scale.setScalar(0.4);
+  nucleus.updateMatrixWorld(true);
+  const mesh = createTailVolume(
+    THREE, registry, nucleus, cfg.color, cfg.segments, cfg.flatten, cfg.ion);
+  const segments = mesh.userData.segments;
+  const points = new Float64Array((segments + 1) * 3);
+  for (let j = 0; j <= segments; j++) {
+    const t = j / segments;
+    points[j * 3] = 3.0 * t;
+    points[j * 3 + 1] = 0.7 * t * t;
+    points[j * 3 + 2] = -0.5 * t + 0.3 * t * t;
+  }
+  writeTailVolume(mesh, points, t => 0.06 + 0.55 * Math.pow(t, 1.3), cfg.opacity);
+  mesh.position.set(...cfg.meshPos);
+  mesh.rotation.y = cfg.meshRotY;
+  mesh.scale.setScalar(cfg.meshScale);
+  mesh.updateMatrixWorld(true);
+  const shim = {
+    getCurrentViewport: v => { v.set(0, 0, size, size); return v; },
+    getPixelRatio: () => 1,
+    capabilities: { isWebGL2: true },
+    getRenderTarget: () => null,
+    getContext: () => ({ getContextAttributes: () => ({ stencil: false }) }),
+    autoClear: true
+  };
+  mesh.onBeforeRender(shim, null, makeCamera(false));
+  // Per-case occlusion overrides on the production values.
+  const U = mesh.material.uniforms;
+  U.occluderCount.value = cfg.count;
+  OCCLUDERS.forEach((o, i) => U.occluders.value[i].set(...o));
+  U.hasNucleusDepth.value = cfg.hasDepth;
+  U.nucleusOpacity.value = cfg.nucleusOpacity;
+  U.depthViewport.value.set(...cfg.viewport);
+  U.depthRange.value = cfg.depthRange;
+  U.screenMaskEnabled.value = cfg.mask;
+  U.comaRadius.value = cfg.comaRadius;
+  U.opacity.value = cfg.opacity;
+  return mesh;
+}
+
+function addSpheres(scene, isNode) {
+  const defs = [
+    { pos: [6, 3, -8], r: 2.5 },
+    { pos: [0, 0, -40], r: 9 }
+  ];
+  for (const o of defs) {
+    let mesh;
+    if (isNode) {
+      const material = new MeshBasicNodeMaterial({ name: "P5e15 sphere TSL" });
+      material.colorNode = vec4(0.3, 0.32, 0.36, 1.0);
+      mesh = new NodeMesh(new NodeSphereGeometry(o.r, 48, 32), material);
+    } else {
+      const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.3, 0.32, 0.36) });
+      mesh = new THREE.Mesh(new THREE.SphereGeometry(o.r, 48, 32), mat);
+    }
+    mesh.position.set(...o.pos);
+    scene.add(mesh);
+  }
+}
+
+function placeLike(mesh, prod) {
+  mesh.position.copy(prod.position);
+  mesh.quaternion.copy(prod.quaternion);
+  mesh.scale.copy(prod.scale);
+  mesh.frustumCulled = false;
+  mesh.updateMatrixWorld(true);
+  return mesh;
+}
+
+function buildGlslScene(prod, prodMesh) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(false);
+  scene.add(camera);
+  if (cfg.spheres) addSpheres(scene, false);
+  const U = prodMesh.material.uniforms;
+  U.nucleusDepth.value = makeDepthTexture(THREE);
+  const material = new THREE.ShaderMaterial({
+    name: "P5e15 tail volume GLSL",
+    uniforms: U,
+    vertexShader: prod.vertex,
+    fragmentShader: prod.fragment,
+    defines: { COMET_ION_TAIL: cfg.ion ? 1 : 0 },
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.BackSide,
+    toneMapped: !cfg.ion,
+    fog: false,
+    blending: THREE.NormalBlending,
+    extensions: { fragDepth: true }
+  });
+  const mesh = placeLike(
+    new THREE.Mesh(prodMesh.geometry.clone(), material), prodMesh);
+  scene.add(mesh);
+  return { scene, camera };
+}
+
+function buildTslScene(prodMesh) {
+  const scene = new NodeScene();
+  const camera = makeCamera(true);
+  scene.add(camera);
+  if (cfg.spheres) addSpheres(scene, true);
+  const U = prodMesh.material.uniforms;
+  const v3 = v => new NodeNS.Vector3(v.x, v.y, v.z);
+  const col = c => new NodeNS.Color(c.r, c.g, c.b);
+  const occlusion = createCometOcclusion({
+    nucleusDepth: makeDepthTexture(NodeNS),
+    localToClip: new NodeNS.Matrix4().fromArray(U.localToClip.value.elements),
+    depthViewport: cfg.viewport,
+    depthRange: cfg.depthRange,
+    hasNucleusDepth: cfg.hasDepth,
+    nucleusOpacity: cfg.nucleusOpacity,
+    occluderCount: cfg.count,
+    occluders: U.occluders.value.map(o => new NodeNS.Vector4(o.x, o.y, o.z, o.w))
+  });
+  const maskImg = U.nodeMask.value.image;
+  const nodeMask = new NodeNS.DataTexture(
+    maskImg.data, maskImg.width, maskImg.height,
+    NodeNS.RedIntegerFormat, NodeNS.UnsignedIntType);
+  // NB: no internalFormat here -- setting "R32UI" (as the
+  // classic mask does) makes the WebGPU backend read zeros.
+  nodeMask.minFilter = NodeNS.NearestFilter;
+  nodeMask.magFilter = NodeNS.NearestFilter;
+  nodeMask.generateMipmaps = false;
+  nodeMask.needsUpdate = true;
+  const volume = createCometTailVolume({
+    occlusion,
+    ionTail: cfg.ion,
+    eye: v3(U.eye.value),
+    sunDirection: v3(U.sunDirection.value),
+    tint: col(U.tint.value),
+    coreTint: col(U.coreTint.value),
+    brightness: U.brightness.value,
+    ionTailMix: U.ionTail.value,
+    opacity: U.opacity.value,
+    comaRadius: U.comaRadius.value,
+    headAxis: v3(U.headAxis.value),
+    boundsMin: v3(U.boundsMin.value),
+    boundsMax: v3(U.boundsMax.value),
+    nodeCount: U.nodeCount.value,
+    metricX: U.metricX.value.map(m => new NodeNS.Vector4(m.x, m.y, m.z, m.w)),
+    metricY: U.metricY.value.map(m => new NodeNS.Vector4(m.x, m.y, m.z, m.w)),
+    metricZ: U.metricZ.value.map(m => new NodeNS.Vector4(m.x, m.y, m.z, m.w)),
+    columnScale: U.columnScale.value,
+    nodeMask,
+    maskViewport: [...[U.maskViewport.value.x, U.maskViewport.value.y, U.maskViewport.value.z, U.maskViewport.value.w]],
+    maskGrid: [U.maskGrid.value.x, U.maskGrid.value.y, U.maskGrid.value.z],
+    screenMaskEnabled: U.screenMaskEnabled.value
+  });
+  const material = new MeshBasicNodeMaterial({ name: "P5e15 tail volume TSL" });
+  material.transparent = true;
+  material.depthWrite = false;
+  material.depthTest = true;
+  material.side = NodeBackSide;
+  material.toneMapped = !cfg.ion;
+  material.vertexNode = volume.vertexNode;
+  material.colorNode = volume.colorNode;
+  material.depthNode = volume.depthNode;
+  const src = prodMesh.geometry;
+  const geometry = new NodeNS.BoxGeometry(2, 2, 2);
+  geometry.setAttribute("position", new NodeNS.BufferAttribute(
+    new Float32Array(src.getAttribute("position").array), 3));
+  const mesh = placeLike(new NodeMesh(geometry, material), prodMesh);
+  scene.add(mesh);
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProductionShaders();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const prodMesh = buildProductionTail();
+  const { scene, camera } = impl === "glsl"
+    ? buildGlslScene(prod, prodMesh)
+    : buildTslScene(prodMesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5tail = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e15 comet-tail ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5tail = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e15 comet-tail error: " + window.__p5tail.error;
+}
+</script>
+</body>
+</html>

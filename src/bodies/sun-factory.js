@@ -7,26 +7,19 @@ let sunFlareTextures = null;
 function getSunFlareTextures() {
     if (sunFlareTextures) return sunFlareTextures;
     const loader = new THREE.TextureLoader;
-    const load = name => {
-        const texture = loader.load(new URL("./data/flares/" + name, document.baseURI).href);
+    const load = (name, folder = "data/flares/") => {
+        const texture = loader.load(new URL("./" + folder + name, document.baseURI).href);
         if ("colorSpace" in texture && THREE.SRGBColorSpace) texture.colorSpace = THREE.SRGBColorSpace;
         texture.magFilter = THREE.LinearFilter;
         texture.minFilter = THREE.LinearMipmapLinearFilter;
         return texture;
     };
-    const atlas = load("SE_ghosts.png");
-    const tile = index => {
-        const texture = atlas.clone();
-        texture.wrapS = THREE.ClampToEdgeWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        texture.repeat.set(.25, 1);
-        texture.offset.set(index * .25, 0);
-        texture.needsUpdate = true;
-        return texture;
-    };
+    // Flare kit that ships under assets/textures/flares; the old data/flares paths
+    // do not exist in the distribution and logged a 404 on every boot.
+    const flare = name => load(name, "assets/textures/flares/");
     sunFlareTextures = {
-        source: load("SE_flare.png"),
-        ghosts: [ tile(0), tile(1), tile(2), tile(3) ]
+        source: flare("lensstar.png"),
+        ghosts: [ flare("flare3.png"), flare("flare4.png"), flare("flare5.png"), flare("flare6.png") ]
     };
     return sunFlareTextures;
 }

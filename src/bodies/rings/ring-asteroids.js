@@ -188,7 +188,7 @@ const MARKER_VERTEX_PARAMETERS = `\nattribute vec4 aOrbit;\nattribute vec4 aMisc
 
 const MARKER_FRAGMENT_PARAMETERS = `\nvarying float vMarkerAlpha;\nvarying float vMarkerShade;\nvarying vec2 vMarkerShape;\n`;
 
-const MARKER_FRAGMENT_SHAPE = `\n    vec2 markerPoint = gl_PointCoord * 2.0 - 1.0;\n    float markerCos = cos(vMarkerShape.y);\n    float markerSin = sin(vMarkerShape.y);\n    markerPoint = vec2(markerCos * markerPoint.x - markerSin * markerPoint.y,\n        markerSin * markerPoint.x + markerCos * markerPoint.y);\n    markerPoint.y /= vMarkerShape.x;\n    float markerAngle = atan(markerPoint.y, markerPoint.x);\n    float markerOutline = 0.91 + 0.045 * sin(3.0 * markerAngle + vMarkerShape.y) +\n        0.025 * sin(5.0 * markerAngle - vMarkerShape.y);\n    float markerEdge = 1.0 - smoothstep(0.58, 1.0, length(markerPoint) / markerOutline);\n    float markerSurfaceAlpha = diffuseColor.a;\n    diffuseColor.a *= markerEdge * vMarkerAlpha;\n    if (diffuseColor.a < 0.001) discard;\n`;
+const MARKER_FRAGMENT_SHAPE = `\n    vec2 markerPoint = gl_PointCoord * 2.0 - 1.0;\n    float markerCos = cos(vMarkerShape.y);\n    float markerSin = sin(vMarkerShape.y);\n    markerPoint = vec2(markerCos * markerPoint.x - markerSin * markerPoint.y,\n        markerSin * markerPoint.x + markerCos * markerPoint.y);\n    markerPoint.y /= vMarkerShape.x;\n    float markerAngle = atan(markerPoint.y, markerPoint.x);\n    float markerOutline = 0.91 + 0.045 * sin(3.0 * markerAngle + vMarkerShape.y) +\n        0.025 * sin(5.0 * markerAngle - vMarkerShape.y);\n    float markerEdge = 1.0 - smoothstep(0.58, 1.0, length(markerPoint) / markerOutline);\n    // Round-12: floor the sampled ring-texture alpha. Markers inherit the ring\n    // texture's alpha at their own orbit uv, so over faint ring regions it\n    // collapsed to ~0 and the discard below erased those particles - the ring\n    // asteroids looked clustered into one small bright area instead of spread\n    // all over the ring. Dense regions are unchanged (their sampled alpha is\n    // already above the floor).\n    float markerSurfaceAlpha = max(diffuseColor.a, 0.28);\n    diffuseColor.a = markerSurfaceAlpha * markerEdge * vMarkerAlpha;\n    if (diffuseColor.a < 0.001) discard;\n`;
 
 const MAP_CHANNELS = [ [ "MAP", "Map", "mapTransform" ], [ "ALPHAMAP", "AlphaMap", "alphaMapTransform" ], [ "EMISSIVEMAP", "EmissiveMap", "emissiveMapTransform" ], [ "ROUGHNESSMAP", "RoughnessMap", "roughnessMapTransform" ], [ "METALNESSMAP", "MetalnessMap", "metalnessMapTransform" ], [ "NORMALMAP", "NormalMap", "normalMapTransform" ], [ "BUMPMAP", "BumpMap", "bumpMapTransform" ], [ "LIGHTMAP", "LightMap", "lightMapTransform" ], [ "AOMAP", "AoMap", "aoMapTransform" ] ];
 
@@ -201,6 +201,8 @@ const MATCHED_SAMPLER = `\nvec4 markerSurfaceSample(sampler2D source, vec2 uv, v
 function matchingRingMaterial(THREE, ring, uniforms) {
     const source = ring.material;
     const material = source.clone();
+
+    material.alphaTest = 0;
     material.transparent = true;
     material.forceSinglePass = true;
     material.extensions = {
@@ -215,9 +217,9 @@ function matchingRingMaterial(THREE, ring, uniforms) {
         shader.vertexShader = MARKER_VERTEX_PARAMETERS + MATCHED_GRADIENTS + "\n" + shader.vertexShader;
         shader.vertexShader = shader.vertexShader.replace("void main() {", `void main() {\n            float markerOrbitAngle = mod(aOrbit.z + aOrbit.w * uDays - uSpin, PI2);\n            vec3 markerPosition = vec3(aOrbit.x * cos(markerOrbitAngle),\n                aOrbit.x * sin(markerOrbitAngle), aOrbit.y);\n            vec4 markerClip = projectionMatrix * modelViewMatrix * vec4(markerPosition, 1.0);\n            vec4 markerClipX = projectionMatrix * modelViewMatrix[0];\n            vec4 markerClipY = projectionMatrix * modelViewMatrix[1];\n            vec2 markerPixelScale = 0.5 * vec2(uViewWidth, uViewHeight) / max(markerClip.w * markerClip.w, 1e-20);\n            vec2 markerScreenX = (markerClipX.xy * markerClip.w - markerClip.xy * markerClipX.w) * markerPixelScale;\n            vec2 markerScreenY = (markerClipY.xy * markerClip.w - markerClip.xy * markerClipY.w) * markerPixelScale;\n            float markerDeterminant = markerScreenX.x * markerScreenY.y - markerScreenY.x * markerScreenX.y;\n            float markerInverse = (markerDeterminant < 0.0 ? -1.0 : 1.0) / max(abs(markerDeterminant), 1e-10);\n            vec2 markerLocalX = vec2(markerScreenY.y, -markerScreenX.y) * markerInverse;\n            vec2 markerLocalY = vec2(-markerScreenY.x, markerScreenX.x) * markerInverse;\n            vec2 markerRadial = vec2(cos(markerOrbitAngle), sin(markerOrbitAngle));\n            vec2 markerAngular = vec2(-markerRadial.y, markerRadial.x) / (PI2 * max(aOrbit.x, 1e-12));\n            vec2 markerRadialUv = markerRadial / (uRingBounds.y - uRingBounds.x);\n            vec2 markerUvDx = vec2(dot(markerAngular, markerLocalX), dot(markerRadialUv, markerLocalX));\n            vec2 markerUvDy = vec2(dot(markerAngular, markerLocalY), dot(markerRadialUv, markerLocalY));\n            vec2 markerUv = vec2(markerOrbitAngle / PI2,\n                clamp((aOrbit.x - uRingBounds.x) / (uRingBounds.y - uRingBounds.x), 0.0, 1.0));`);
         shader.vertexShader = shader.vertexShader.replace("#include <uv_vertex>", "#include <uv_vertex>\n" + MATCHED_TEXTURES.map(([flag, name, texture]) => `#ifdef USE_${flag}\nvMarker${name}Dx = (${texture}Transform * vec3(markerUvDx, 0.0)).xy;\nvMarker${name}Dy = (${texture}Transform * vec3(markerUvDy, 0.0)).xy;\n#endif`).join("\n") + "\n" + MAP_CHANNELS.map(([flag, name, transform]) => `#ifdef USE_${flag}\nv${name}Uv = (${transform} * vec3(markerUv, 1.0)).xy;\n#endif`).join("\n"));
-        shader.vertexShader = shader.vertexShader.replace("#include <beginnormal_vertex>", `\n            #include <beginnormal_vertex>\n            vec3 markerEye = -(modelViewMatrix * vec4(markerPosition, 1.0)).xyz;\n            if (dot(normalMatrix * objectNormal, markerEye) < 0.0) objectNormal = -objectNormal;`);
+        shader.vertexShader = shader.vertexShader.replace("#include <beginnormal_vertex>", `\n            #include <beginnormal_vertex>\n            // Round-14: the marker normal used to be flipped to face the CAMERA,\n            // so marker lighting/shadow boundaries followed the view direction\n            // while the ring itself shades purely by the SUN - the planet's\n            // shadow fell at a visibly different angle on the markers than on\n            // the ring. Markers now keep the ring plane's own normal, exactly\n            // like the ring surface, so both shadow systems (planet eclipse +\n            // ring sun-shading) agree on markers and ring.`);
         shader.vertexShader = shader.vertexShader.replace("#include <begin_vertex>", `\n            #include <begin_vertex>\n            transformed = markerPosition;`);
-        shader.vertexShader = shader.vertexShader.replace("#include <project_vertex>", `\n            #include <project_vertex>\n            float markerPixelsPerUnit = 0.5 * projectionMatrix[1][1] * uViewHeight;\n            float markerPhysicalPixels = max(0.0, aMisc.y * uUnitsPerMeter * markerPixelsPerUnit /\n                max(0.0000001, -mvPosition.z));\n            gl_PointSize = max(1.0, markerPhysicalPixels);\n            float markerCoverage = min(1.0, markerPhysicalPixels * markerPhysicalPixels /\n                (gl_PointSize * gl_PointSize));\n            float markerPopulation = 1.0 - smoothstep(uPopulation,\n                uPopulation + uPopulationFeather, aStyle.w);\n            vMarkerAlpha = aMisc.x * uFade * markerPopulation * markerCoverage * 0.92;\n            vMarkerShade = 0.9 + 0.08 * aMisc.z;\n            vMarkerShape = aStyle.yz;`);
+        shader.vertexShader = shader.vertexShader.replace("#include <project_vertex>", `\n            #include <project_vertex>\n            float markerPixelsPerUnit = 0.5 * projectionMatrix[1][1] * uViewHeight;\n            float markerPhysicalPixels = max(0.0, aMisc.y * uUnitsPerMeter * markerPixelsPerUnit /\n                max(0.0000001, -mvPosition.z));\n            float markerPointPixels = max(markerPhysicalPixels, 1.7);\n            gl_PointSize = markerPointPixels;\n            float markerCoverage = markerPhysicalPixels >= 1.0 ?\n                min(1.0, markerPhysicalPixels * markerPhysicalPixels /\n                (markerPointPixels * markerPointPixels)) : 0.85;\n            float markerPopulation = 1.0 - smoothstep(uPopulation,\n                uPopulation + uPopulationFeather, aStyle.w);\n            vMarkerAlpha = aMisc.x * uFade * markerPopulation * markerCoverage * 0.92;\n            vMarkerShade = 0.9 + 0.08 * aMisc.z;\n            vMarkerShape = aStyle.yz;`);
         shader.fragmentShader = MARKER_FRAGMENT_PARAMETERS + MATCHED_GRADIENTS + MATCHED_SAMPLER + "\n" + shader.fragmentShader;
         for (const [, name, texture, chunkName] of MATCHED_TEXTURES) {
             const chunk = THREE.ShaderChunk[chunkName];
@@ -227,7 +229,7 @@ function matchingRingMaterial(THREE, ring, uniforms) {
         shader.fragmentShader = shader.fragmentShader.replace("#include <opaque_fragment>", MARKER_FRAGMENT_SHAPE + "\n#include <opaque_fragment>");
         shader.fragmentShader = shader.fragmentShader.replace("#include <colorspace_fragment>", "#include <colorspace_fragment>\ngl_FragColor.rgb *= vMarkerShade * mix(0.55, 1.0, markerSurfaceAlpha);");
     };
-    material.customProgramCacheKey = () => source.customProgramCacheKey() + "|ring-surface-points-3";
+    material.customProgramCacheKey = () => source.customProgramCacheKey() + "|ring-surface-points-5";
     return material;
 }
 
@@ -268,6 +270,10 @@ export class RingAsteroids {
         this.layers = [];
         this.dayBase = null;
         this.population = QUALITY[this.getQuality()] ?? QUALITY.high;
+        this._spinQuat = new THREE.Quaternion;
+        this._spinEx = new THREE.Vector3;
+        this._spinNormal = new THREE.Vector3;
+        this._spinCross = new THREE.Vector3;
         this.cameraPosition = new THREE.Vector3;
         this.ringPosition = new THREE.Vector3;
         this.worldScale = new THREE.Vector3;
@@ -413,7 +419,8 @@ export class RingAsteroids {
                 outer: bounds.outer,
                 count: count,
                 drawCount: drawCount,
-                fade: 0
+                fade: 0,
+                spinRef: null
             });
         }
     }
@@ -463,7 +470,16 @@ export class RingAsteroids {
             }
             const uniforms = layer.uniforms;
             uniforms.uDays.value = time - this.dayBase;
-            uniforms.uSpin.value = wrapAngle(layer.planet.rotation.y);
+            layer.ring.updateWorldMatrix(true, false);
+            layer.ring.getWorldQuaternion(this._spinQuat);
+            this._spinEx.set(1, 0, 0).applyQuaternion(this._spinQuat);
+            this._spinNormal.set(0, 0, 1).applyQuaternion(this._spinQuat);
+            if (!layer.spinRef) layer.spinRef = {
+                ex: this._spinEx.clone(),
+                n: this._spinNormal.clone()
+            };
+            this._spinCross.crossVectors(layer.spinRef.ex, this._spinEx);
+            uniforms.uSpin.value = wrapAngle(Math.atan2(this._spinCross.dot(this._spinNormal), layer.spinRef.ex.dot(this._spinEx)));
             uniforms.uFade.value = layer.fade;
             uniforms.uPopulation.value = selectedPopulation;
             uniforms.uPopulationFeather.value = selectedFeather;

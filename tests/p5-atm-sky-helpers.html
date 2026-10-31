@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c10 — atmosphere sky helpers GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c10 atmosphere sky helpers starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { atmRayLimit, atmSkyOpticalDepth } from "../src/shaders/planet-atmosphere.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  REVISION
+} from "three/webgpu";
+import { exp, float, uv, vec3, vec4 } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+// The helpers are pure scalar functions; the frame sweeps their whole
+// input domain: uv.x -> ray cosine mu in [-1, 1], uv.y -> eye radius
+// from the ground (r = 1) upward by rSpan. The path length fed to the
+// optical depth is the ray limit itself, as in the shell fragments.
+// Cases: Earth-like thin shell; a thick shell seen from well inside and
+// above it; a very thick shell from far above; a very thin shell at
+// grazing heights.
+const CASES = [
+  { H: 0.00133, rTop: 1.00942, rSpan: 0.02 },
+  { H: 0.012, rTop: 1.08, rSpan: 0.5 },
+  { H: 0.05, rTop: 1.25, rSpan: 1.5 },
+  { H: 0.0004, rTop: 1.003, rSpan: 0.004 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5sky = { done: false, error: null };
+
+async function loadProductionHelpers() {
+  const text = await fetch("../src/shaders/planet-atmosphere.glsl.js").then(r => {
+    if (!r.ok) throw new Error("planet-atmosphere.glsl.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const at = text.indexOf("const ATMOSPHERE_SKY_HELPERS = ");
+  const tick = text.indexOf(tickChar, at);
+  const end = text.indexOf(tickChar, tick + 1);
+  if (at < 0 || tick < 0 || end < 0) throw new Error("ATMOSPHERE_SKY_HELPERS literal bounds not found");
+  const glsl = Function("return " + text.slice(tick, end + 1))();
+  if (!glsl.includes("atmSkyOpticalDepth") || !glsl.includes("atmRayLimit")) {
+    throw new Error("extracted GLSL is not the sky helpers");
+  }
+  return glsl;
+}
+
+// One encoding, written once per language with identical operations:
+// R saturates the optical depth along the limited ray, G is the ray
+// limit itself, B is a second optical depth at a different scale
+// height/cosine/length so both functions are exercised off the
+// diagonal of their domains.
+function makeGlslMaterial(helpers) {
+  return new THREE.ShaderMaterial({
+    name: "P5c10 atmosphere sky helpers GLSL reference",
+    uniforms: {
+      uH: { value: cfg.H },
+      uRTop: { value: cfg.rTop },
+      uRSpan: { value: cfg.rSpan }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      uniform float uH;
+      uniform float uRTop;
+      uniform float uRSpan;
+      ${helpers}
+      void main() {
+        float mu = vUv.x * 2.0 - 1.0;
+        float r = 1.0 + vUv.y * uRSpan;
+        float lim = atmRayLimit(r, mu, uRTop);
+        float od1 = atmSkyOpticalDepth(uH, r, mu, lim);
+        float od2 = atmSkyOpticalDepth(uH * 3.7, r, mu * 0.5, lim * 0.61 + 0.001);
+        gl_FragColor = vec4(1.0 - exp(-od1 * 8.0), lim / uRTop * 4.0, 1.0 - exp(-od2 * 4.0), 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P5c10 atmosphere sky helpers TSL" });
+  const pUv = uv();
+  const H = float(cfg.H);
+  const mu = pUv.x.mul(2.0).sub(1.0);
+  const r = float(1.0).add(pUv.y.mul(cfg.rSpan));
+  const lim = atmRayLimit(r, mu, float(cfg.rTop));
+  const od1 = atmSkyOpticalDepth(H, r, mu, lim);
+  const od2 = atmSkyOpticalDepth(H.mul(3.7), r, mu.mul(0.5), lim.mul(0.61).add(0.001));
+  material.colorNode = vec4(vec3(
+    float(1.0).sub(exp(od1.mul(8.0).mul(-1.0))),
+    lim.div(cfg.rTop).mul(4.0),
+    float(1.0).sub(exp(od2.mul(4.0).mul(-1.0)))
+  ), float(1.0));
+  return material;
+}
+
+try {
+  const helpers = impl === "glsl" ? await loadProductionHelpers() : null;
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(90, 1, 0.1, 10);
+    material = makeGlslMaterial(helpers);
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(90, 1, 0.1, 10);
+    material = makeTslMaterial();
+    mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  }
+  camera.position.set(0, 0, 1);
+  camera.lookAt(0, 0, 0);
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5sky = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    H: cfg.H,
+    rTop: cfg.rTop,
+    rSpan: cfg.rSpan,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c10 atmosphere sky helpers ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5sky = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c10 atmosphere sky helpers error: " + window.__p5sky.error;
+}
+</script>
+</body>
+</html>

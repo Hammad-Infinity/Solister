@@ -9,6 +9,10 @@ Solister presents one physically scaled solar-system scene. A shared position,
 rendering, and navigation pipeline keeps body placement consistent; scientific
 coverage and accuracy still vary by object, dataset, epoch, and visual effect.
 
+The look of the project aims at the resolution and sense of scale of desktop
+space simulators. Everything here is implemented for the browser with Three.js,
+from published scattering models and the data credited at the end of this file.
+
 The application runs in the browser and is served as static files. It requires
 no application backend, live astronomy API, Node.js runtime, or build step for
 normal use. Libraries, numerical data, textures, and audio must be included in
@@ -173,8 +177,9 @@ have finite limits.
 - Mouse wheel and `-` / `+` zoom. Selecting a body uses a smooth camera flight.
 
 The floating origin shifts the scene root and camera together during long
-navigation so nearby body geometry remains near the numeric origin. It resets
-camera-motion history when rebasing to prevent artificial streaks.
+navigation so nearby body geometry remains near the numeric origin. It carries
+the camera-follow and landing reference positions across each rebase so the
+view does not jump.
 
 ## Ephemeris and orbital accuracy
 
@@ -443,52 +448,48 @@ eye-safe representation of looking at the real Sun.
 
 ### Atmospheres and electrical activity
 
-Atmosphere-bearing bodies use a **ray-marched 3D scattering volume**, not a
-camera-facing glow. The shader separately evaluates Rayleigh and Mie density,
-with independent scale heights, and distinguishes Mie scattering from Mie
-extinction. Earth, Venus, and Mars also receive a separate, camera-altitude-
-blended ground aerial-perspective hook on their surface materials, using five
-density samples along the camera-to-surface path. The shell atmosphere is
-attenuated during the close-ground blend so both treatments do not simply stack
-at full strength. Supplied SpaceEngine columns are integrated as a single continuous
-profile from the reference surface to the supplied top altitude; the shader no
-longer introduces arbitrary equal-height internal bands. Project-authored
-multi-layer profiles retain their source optical depths and cross-fade adjacent
-density fields at layer boundaries. Ray intersections and local altitude use
-each body's reference-ellipsoid axes, keeping the scattering volume aligned to
-the solid body. Earth additionally receives lunar-eclipse shadowing. Outside the
-shell, the volume depth-tests normally; inside it, the shader marches to the
-analytic body-surface intersection and the shell pass bypasses opaque-ground
-depth testing so the close-approach haze does not vanish at entry.
+Atmosphere-bearing bodies render a **precomputed scattering shell** in the
+Bruneton style, not a camera-facing glow. The shell owns the entire optical
+path: it intersects the ray with the atmosphere's outer surface and the
+reference ellipsoid, reconstructs optical depth from a transmittance table, and
+composes single- and multiple-scattering contributions looked up in GPU-generated
+tables rather than accumulated per frame.
 
-SpaceEngine documents these as precomputed atmosphere models described by
-`atmospheres.cfg` in its [planet-creation manual](https://spaceengine.org/manual/making-addons/creating-a-planet/).
-The supplied standard profiles now drive rendered scattering for Earth, Venus,
-Mars, Jupiter, Titan, Neptune, and Pluto. Earth, Venus, Mars,
-and Pluto use values cross-checked between the supplied binary `.atm` files
-(`.atm.txt` attachments) and `atmospheres.cfg.txt`; Jupiter, Titan, and Neptune
-use the active standard entries in the supplied configuration. The renderer
-applies the configured coefficient scale factors to the RGB Rayleigh, Mie
-scattering, and Mie extinction coefficients, along with each model’s separate
-Rayleigh/Mie scale heights and Mie anisotropy. The first 15 little-endian
-float32 header values of the four binary files agree with those parameters to
-float32 precision. The remaining binary payload has not been decoded or loaded,
-so this is a parameter-based volumetric implementation, **not a claim of direct
-SpaceEngine LUT import**. `MieFade` is preserved as source metadata, but its
-binary semantics were not established and it is not applied as an invented
-shader control.
+The tables use the classic three-part layout — a transmittance table, a
+single-scattering table, and an additively accumulated multiple-scattering
+atlas. They are **generated on the GPU at startup from each body's physical
+parameters**: surface radius, atmosphere top, Rayleigh and Mie scale heights, RGB
+Rayleigh and Mie coefficients, Mie anisotropy and `MieFade`. They are *not*
+decoded from the supplied binary `.atm` payload; the first 15 little-endian
+float32 header values of those files were cross-checked against the bundled
+configuration to float32 precision, but the payload itself remains undecoded, so
+this is a generated-table implementation and **not a claim of direct LUT import**.
 
-The supplied configuration has no active standard Saturn or Uranus preset, so
-those bodies retain Solister’s project-authored layered profiles. The
-project-authored gas, pressure, temperature, and altitude layers also remain the
-input to the illustrative lightning system. Mercury’s exosphere has negligible
-visible scattering; the Moon has no atmosphere shell. The Earth profile used by
-the volumetric renderer is the supplied 60 km SpaceEngine column; the separate
-storm/event model keeps its own atmospheric layer facts for visual placement.
+The runtime math follows the published Bruneton model. The Mie term is faded by
+`smoothstep(0, MieFade, eye·sun)`, and the accumulation passes write a zero alpha
+plane, since they are additive and any non-zero alpha would accumulate once per
+scattering order. MieFade is therefore an active control, not preserved
+metadata.
+
+Ray intersections and local altitude use each body's reference-ellipsoid axes,
+keeping the shell aligned to the solid body. Earth additionally receives
+lunar-eclipse shadowing through the shared `solarVisibility` term. Outside the
+shell the surface depth-tests normally; inside it the shell bypasses opaque-ground
+depth testing so close-approach haze does not vanish at entry, and the same
+tables produce the sky you see standing on the ground.
+
+Nine bodies can carry a shell: Earth, Venus, Mars, Jupiter, Saturn, Uranus,
+Neptune, Titan and Pluto. Of those, seven (everything except Titan and Pluto) are
+present in the default system and build their shells at startup; Titan and Pluto
+acquire theirs when those bodies are instantiated. Mercury's exosphere falls
+below the shell's optical-depth threshold and renders no atmosphere; the Moon has
+none. Per-body coefficients
+come from the bundled reference models where one exists, and are otherwise
+derived from the profile's optical depth (`beta = tau / H`).
 
 Solar direction follows the Sun-to-body vector each frame, and direct
 scattering brightness varies approximately with inverse-square solar irradiance
-relative to Earth. SpaceEngine’s supplied atmosphere files specify scattering
+relative to Earth. The supplied reference atmosphere files specify scattering
 profiles, not discharge locations, lightning rates, or storm forecasts; no
 lightning dataset was included. Lightning is drawn as a session-randomized,
 procedural-cloud-mask-conditioned visual approximation within illustrative
@@ -528,7 +529,7 @@ a grazing-corrected sunlight slant estimate instead of a nested sun march. It
 adds no render pass and performs no per-frame CPU layer integration;
 body-center, body-local ellipsoid basis, solar direction, and relative solar
 irradiance are updated per visible shell. See
-`src/data/spaceengine-atmosphere-models.js` for
+`src/data/atmosphere-reference-models.js` for
 the translated standard-profile inputs. NASA’s [planetary atmosphere
 overview](https://science.nasa.gov/solar-system/10-things-planetary-atmospheres/)
 and [Earth atmospheric-layer guide](https://science.nasa.gov/earth/earth-atmosphere/earths-atmosphere-a-multi-layered-cake/)
@@ -723,12 +724,6 @@ manifest lists it. There is no separate enhancement-map tier, and relief or
 normal maps are not part of the shipped asset set. Focus-dependent texture
 handling and a separate sky budget further affect what is resident in memory.
 
-### HDR
-
-**HDR** is the interface name for a visual preset, not HDR-monitor output or a
-calibrated radiometric pipeline. It changes sky presentation, lighting, and
-close-body bloom without changing orbital positions.
-
 ## Interface and shortcuts
 
 The dock provides simulation controls, quality settings, View controls, and focus
@@ -739,7 +734,7 @@ information.
   separate Camera and Audio menus.
 - **View:** path styles, **Markers**, Milky Way, Comets, labels, constellation
   controls (including the focused-body Surface Grid), and asteroid populations.
-- **Quality:** graphics tier, available sky texture choices, HDR, and a
+- **Quality:** graphics tier, available sky texture choices, and a
   **30 / 48 / 60 FPS** cap.
 - **Focus:** body name, description, physical facts, distance information, and
   applicable body-specific controls such as Earth clouds or Venus atmosphere.
@@ -813,9 +808,9 @@ not hardcoded here: they change with releases and asset packages.
 | `src/core/` | Engine coordination, adaptive worker/cache integration, placement, orbit geometry, rendering helpers |
 | `src/bodies/` | Body catalogue/shapes, factories, planets, rings, and small-body layers |
 | `src/sim/` | Theory/runtime helpers, interpolation curves, path history, trails, approximate orbit propagation |
-| `src/render/` | Texture pipeline, procedural textures, HDR and camera-motion effects |
+| `src/render/` | Texture pipeline, procedural textures, atmosphere transmittance table, BRDF and log-depth helpers |
 | `src/shaders/` | Eclipse, atmosphere, and shadow shader integrations |
-| `src/data/` | Translated SpaceEngine standard-atmosphere parameters used by the volumetric shader |
+| `src/data/` | Translated standard-atmosphere reference parameters used by the volumetric shader |
 | `src/ui/`, `src/systems/` | Dock, focus/navigation, input, camera and supporting interfaces |
 | `src/sky/` | Sky maps, constellation rendering and sky controls |
 | `data/` | Numerical tables, metadata, catalogues, validation/provenance and reference material |

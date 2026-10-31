@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c21 — aurora shell GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 296px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="384" height="288"></canvas>
+<div id="status">P5c21 aurora shell starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  createAuroraShell,
+  derivePlanetAuroraInstall
+} from "../src/bodies/planet-factory.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  AdditiveBlending as NodeAdditiveBlending,
+  DoubleSide as NodeDoubleSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const W = 384, H = 288;
+const canvas = document.getElementById("c");
+
+// Frame cases: injected shell-mode profiles (production's table
+// selects sprites for every body, so the shell branch needs test
+// profiles to exercise the real factory code), frozen time.
+const FRAME_CASES = [
+  { profile: { mode: 1, ovalLat: 1.17, ovalWidth: 0.09, height: 0.08, tiltX: 0.35, tiltZ: 0.2, shell: 1.06, gain: 1, colorA: [0.22, 1, 0.42], colorB: [1, 0.3, 0.25], colorC: [0.62, 0.3, 1] },
+    time: 17, intensity: 25, sun: [-1.5, 0.8, -6], cam: [0.5, 1.1, 2.7] },
+  { profile: { mode: 2, ovalLat: 1.2, ovalWidth: 0.07, height: 0.08, tiltX: -0.2, tiltZ: 0.5, shell: 1.04, gain: 1, colorA: [0.45, 0.85, 1], colorB: [0.8, 0.5, 1], colorC: [0.6, 1, 0.8] },
+    time: 4.5, intensity: 0.3, sun: [2, -1, -5], cam: [-0.8, 0.6, 2.7] },
+  { profile: { mode: 1, ovalLat: 1.05, ovalWidth: 0.14, height: 0.08, tiltX: 0.1, tiltZ: -0.3, shell: 1.08, gain: 1, colorA: [0.6, 0.48, 1], colorB: [1, 0.45, 0.78], colorC: [0.4, 0.8, 1] },
+    time: 40, intensity: 18, sun: [5, 2.5, -2], cam: [0.3, 1.4, 2.5] }
+];
+const caseIndex = Math.max(0, Math.min(FRAME_CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = FRAME_CASES[caseIndex];
+
+window.__p5aurora = { done: false, error: null };
+window.THREE = THREE;
+
+// BodyShapes recorder (the P5c15 precedent): geometry creation is
+// not under test; the request parameters are captured, and the
+// returned geometry is a faithful sphere.
+let lastShellRequest = null;
+const AXES_KM = {
+  earth: [6378.137, 6356.752, 6378.137],
+  neptune: [24764, 24341, 24764],
+  __shellone: [1000, 900, 950]
+};
+window.BodyShapes = {
+  axesKm: AXES_KM,
+  createGeometry(three, key, radius, w, h) {
+    lastShellRequest = { key, radius, widthSegments: w, heightSegments: h };
+    return new three.SphereGeometry(radius, w, h);
+  }
+};
+
+let PROFILES = null;
+async function loadProduction() {
+  // Registers the LDB_* globals the factory's shader templates
+  // interpolate at load time.
+  await import("../src/render/log-depth-glsl.js");
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "../src/bodies/planet-factory.js";
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  if (typeof window.createPlanetAurora !== "function") {
+    throw new Error("production planet factory did not load");
+  }
+  PROFILES = Function("return AURORA_PROFILES")();
+  PROFILES.__shellone = { mode: 1, ovalLat: 1.17, ovalWidth: 0.05, height: 0.08, tiltX: 0.11, tiltZ: 0.22, shell: 1.03, gain: 0.7, colorA: [0.2, 0.9, 0.4], colorB: [0.9, 0.3, 0.3], colorC: [0.5, 0.4, 1] };
+  PROFILES.__shelltwo = { mode: 2, ovalLat: 1.25, ovalWidth: 0.06, height: 0.08, tiltX: -0.15, tiltZ: 0.4, shell: 1.05, gain: 0.5, colorA: [0.4, 0.8, 1], colorB: [0.7, 0.5, 1], colorC: [0.6, 1, 0.7] };
+  PROFILES.__shellbad = { mode: 1, ovalLat: 1.1, ovalWidth: 0.05, height: 0.08, tiltX: 0, tiltZ: 0, shell: 1.02, gain: 0.3, colorA: [1, 1, 1], colorB: [1, 1, 1], colorC: [1, 1, 1] };
+  PROFILES[`__fr${caseIndex}`] = cfg.profile;
+}
+
+function uniformValues(material) {
+  const out = {};
+  for (const [name, entry] of Object.entries(material.uniforms)) {
+    const v = entry.value;
+    out[name] = (v && (v.isColor || v.isVector3)) ? v.toArray() : v;
+  }
+  return out;
+}
+
+function productionCase(spec) {
+  const geo = new THREE.SphereGeometry(Math.max(spec.radius, 1e-9), 8, 8);
+  geo.parameters.radius = spec.radius;
+  const body = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+  lastShellRequest = null;
+  const aurora = window.createPlanetAurora(spec.key, body);
+  if (!aurora) return null;
+  const uniforms = uniformValues(aurora.material);
+  const isSprites = "uBaseR" in aurora.material.uniforms;
+  return {
+    branch: isSprites ? "sprites" : "shell",
+    geometry: isSprites ? {
+      kind: "aurora-sprites",
+      perPole: aurora.geometry.instanceCount / 2,
+      instanceCount: aurora.geometry.instanceCount,
+      boundingRadius: aurora.geometry.boundingSphere.radius
+    } : {
+      kind: "body-shape",
+      radius: lastShellRequest.radius,
+      widthSegments: lastShellRequest.widthSegments,
+      heightSegments: lastShellRequest.heightSegments
+    },
+    uniforms,
+    material: {
+      transparent: aurora.material.transparent,
+      depthWrite: aurora.material.depthWrite,
+      depthTest: aurora.material.depthTest,
+      blending: aurora.material.blending === THREE.AdditiveBlending ? "additive" : String(aurora.material.blending),
+      side: aurora.material.side === THREE.DoubleSide ? "double" : String(aurora.material.side),
+      toneMapped: aurora.material.toneMapped
+    },
+    rotation: [aurora.rotation.x, aurora.rotation.y, aurora.rotation.z],
+    renderOrder: aurora.renderOrder,
+    frustumCulled: aurora.frustumCulled,
+    gain: aurora.userData.auroraGain
+  };
+}
+
+function derivationCases() {
+  const specs = [
+    { name: "earth-sprites", key: "earth", radius: 1 },
+    { name: "neptune-sprites", key: "neptune", radius: 2.5 },
+    { name: "shell-mode-1", key: "__shellone", radius: 1 },
+    { name: "shell-mode-2", key: "__shelltwo", radius: 0.75 },
+    { name: "no-profile", key: "mars", radius: 1 },
+    { name: "bad-radius", key: "__shellbad", radius: 0 }
+  ];
+  return specs.map((spec) => ({
+    name: spec.name,
+    production: productionCase(spec),
+    tsl: derivePlanetAuroraInstall({
+      key: spec.key,
+      profile: PROFILES[spec.key],
+      radius: spec.radius,
+      axesKm: AXES_KM[spec.key]
+    })
+  }));
+}
+
+try {
+  await loadProduction();
+  const derivation = derivationCases();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  const key = `__fr${caseIndex}`;
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 100);
+    const body = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 8, 8), new THREE.MeshBasicMaterial());
+    mesh = window.createPlanetAurora(key, body);
+    if (!mesh) throw new Error("production factory returned no aurora for the frame case");
+    body.remove(mesh);
+    material = mesh.material;
+    material.uniforms.uTime.value = cfg.time;
+    material.uniforms.uIntensity.value = cfg.intensity;
+    material.uniforms.uSunWorldPos.value.set(...cfg.sun);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(40, W / H, 0.01, 100);
+    material = new MeshBasicNodeMaterial({ name: "P5c21 aurora shell TSL" });
+    material.transparent = true;
+    material.depthWrite = false;
+    material.depthTest = true;
+    material.blending = NodeAdditiveBlending;
+    material.side = NodeDoubleSide;
+    material.toneMapped = false;
+    const { colorNode } = createAuroraShell({
+      mode: cfg.profile.mode,
+      time: cfg.time,
+      intensity: cfg.intensity,
+      sunWorldPos: cfg.sun,
+      colorA: cfg.profile.colorA,
+      colorB: cfg.profile.colorB,
+      colorC: cfg.profile.colorC,
+      ovalLat: cfg.profile.ovalLat,
+      ovalWidth: cfg.profile.ovalWidth,
+      seed: (key.length * 7.13) % 10
+    });
+    material.colorNode = colorNode;
+    mesh = new NodeMesh(new NodeSphereGeometry(cfg.profile.shell, 160, 112), material);
+    mesh.rotation.set(cfg.profile.tiltX, 0, cfg.profile.tiltZ);
+  }
+  camera.position.set(...cfg.cam);
+  camera.lookAt(0, 0, 0);
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5aurora = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    width: W,
+    height: H,
+    caseShape: {
+      mode: cfg.profile.mode, ovalLat: cfg.profile.ovalLat, ovalWidth: cfg.profile.ovalWidth,
+      shell: cfg.profile.shell, tiltX: cfg.profile.tiltX, tiltZ: cfg.profile.tiltZ,
+      time: cfg.time, intensity: cfg.intensity, sun: cfg.sun, cam: cfg.cam
+    },
+    derivation,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c21 aurora shell ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5aurora = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c21 aurora shell error: " + window.__p5aurora.error;
+}
+</script>
+</body>
+</html>

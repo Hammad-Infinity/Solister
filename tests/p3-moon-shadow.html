@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P3 — Moon Earth-shadow GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script src="../src/shaders/moon-shadow.glsl.js"></script>
+<script>
+  globalThis.__MOON_EARTH_SHADOW_GLSL = MOON_EARTH_SHADOW_GLSL;
+</script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P3 moon-shadow starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { moonEarthShadowFactor } from "../src/shaders/moon-shadow.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { uv, vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+const CASES = [
+  { earth: [5, 0, 0], earthRadius: 1.0 },
+  { earth: [4, 3, 0], earthRadius: 1.2 },
+  { earth: [-3, 4, 1], earthRadius: 0.7 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p3 = { done: false, error: null };
+
+function makeGlslMaterial() {
+  const glsl = globalThis.__MOON_EARTH_SHADOW_GLSL;
+  if (!glsl) throw new Error("MOON_EARTH_SHADOW_GLSL was not loaded");
+  return new THREE.ShaderMaterial({
+    name: "P3 moon-shadow GLSL reference",
+    uniforms: {
+      uEarthPos: { value: new THREE.Vector3(...cfg.earth) },
+      uEarthRadius: { value: cfg.earthRadius }
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying vec2 vUv;
+      uniform vec3 uEarthPos;
+      uniform float uEarthRadius;
+      ${glsl}
+      void main() {
+        vec3 p = uEarthPos + vec3((vUv * 2.0 - 1.0) * 2.0, (vUv.x - 0.5) * 0.8);
+        float f = moonEarthShadowFactor(p, uEarthPos, uEarthRadius);
+        float shadow = (1.0 - f) / 0.92;
+        gl_FragColor = vec4(f, shadow, f * f, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P3 moon-shadow TSL" });
+  const pUv = uv();
+  const earth = vec3(...cfg.earth);
+  const offset = vec3(
+    pUv.x.mul(2.0).sub(1.0).mul(2.0),
+    pUv.y.mul(2.0).sub(1.0).mul(2.0),
+    pUv.x.sub(0.5).mul(0.8)
+  );
+  const f = moonEarthShadowFactor(earth.add(offset), earth, float(cfg.earthRadius));
+  const shadow = float(1.0).sub(f).div(0.92);
+  material.colorNode = vec4(f, shadow, f.mul(f), float(1.0));
+  return material;
+}
+
+try {
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeGlslMaterial();
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeTslMaterial();
+    mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p3 = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P3 moon-shadow ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p3 = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P3 moon-shadow error: " + window.__p3.error;
+}
+</script>
+</body>
+</html>

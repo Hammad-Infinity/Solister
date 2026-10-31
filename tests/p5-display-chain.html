@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5 — display chain GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 152px; white-space: pre-wrap; }
+</style>
+<script src="../src/render/display/tone-mapping.js"></script>
+<script src="../src/render/display/bloom.js"></script>
+<script src="../src/render/display/dither.js"></script>
+<script src="../src/render/display/antialias.js"></script>
+<script src="../src/render/display/display-chain.js"></script>
+<script>
+  globalThis.__DISPLAY_GLSL = {
+    createBloom,
+    createDither,
+    createAntialias,
+    createDisplayChain,
+    defaultExposure: DISPLAY_DEFAULT_EXPOSURE
+  };
+</script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="192" height="144"></canvas>
+<div id="status">P5 display chain starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createBloom as createBloomTSL } from "../src/render/display/bloom.tsl.js";
+import { createDither as createDitherTSL } from "../src/render/display/dither.tsl.js";
+import { createAntialias as createAntialiasTSL } from "../src/render/display/antialias.tsl.js";
+import { createDisplayChain as createDisplayChainTSL } from "../src/render/display/display-chain.tsl.js";
+import { DISPLAY_DEFAULT_EXPOSURE as TSL_DEFAULT_EXPOSURE } from "../src/render/display/tone-mapping.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  RenderTarget as NodeRenderTarget,
+  HalfFloatType as NodeHalfFloatType,
+  RGBAFormat as NodeRGBAFormat,
+  NearestFilter as NodeNearestFilter,
+  LinearFilter as NodeLinearFilter,
+  UnsignedByteType as NodeUnsignedByteType,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  NoBlending as NodeNoBlending,
+  REVISION
+} from "three/webgpu";
+import {
+  Fn, uv, float, vec2, vec3, vec4, abs, floor, fract, length, mix, smoothstep, step
+} from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const mode = params.get("mode") || "all";
+const width = Math.max(64, Math.min(512, Number(params.get("width") || 192) | 0));
+const height = Math.max(64, Math.min(512, Number(params.get("height") || 144) | 0));
+const canvas = document.getElementById("c");
+canvas.width = width;
+canvas.height = height;
+canvas.style.width = width + "px";
+canvas.style.height = height + "px";
+status.style.top = (height + 8) + "px";
+const FIXED_DITHER_TIME = 12.345;
+window.__p5 = { done: false, error: null };
+
+const WORLD_GLSL = /* glsl */`
+  precision highp float;
+  varying vec2 vUv;
+  void main() {
+    vec2 p = vUv;
+    vec3 r = vec3(p.x * 0.18, p.y * 0.16, (p.x + p.y) * 0.055);
+    float diag = abs((p.x * 0.82 + p.y * 0.58) - 0.72);
+    r += vec3(0.20, 0.10, 0.02) * (1.0 - step(0.035, diag));
+    float checker = step(0.5, fract((floor(p.x * 24.0) + floor(p.y * 18.0)) * 0.5));
+    float inCorner = step(p.x, 0.32) * step(0.68, p.y);
+    r += vec3(0.12, 0.03, 0.10) * checker * inCorner;
+    float d = length((p - vec2(0.68, 0.60)) * vec2(1.0, 1.18));
+    float disc = 1.0 - smoothstep(0.145, 0.155, d);
+    r += vec3(9.0, 6.0, 2.5) * disc;
+    float core = 1.0 - smoothstep(0.035, 0.045, d);
+    r += vec3(14.0, 9.0, 5.0) * core;
+    float bar = step(abs(p.y - 0.18), 0.025) * step(0.15, p.x) * step(p.x, 0.85);
+    r += vec3(1.6, 0.45, 0.25) * bar;
+    float alpha = mix(-0.5, 0.0, step(0.25, p.x));
+    alpha = mix(alpha, 0.5, step(0.50, p.x));
+    alpha = mix(alpha, 2.0, step(0.75, p.x));
+    gl_FragColor = vec4(r, alpha);
+  }
+`;
+
+function makeGlslWorld() {
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+  camera.position.z = 1;
+  const material = new THREE.ShaderMaterial({
+    name: "P5 display synthetic HDR GLSL",
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: WORLD_GLSL,
+    depthTest: false,
+    depthWrite: false
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  return { scene, camera, material };
+}
+
+function worldPatternTSL() {
+  const p = uv().toVar();
+  let r = vec3(p.x.mul(0.18), p.y.mul(0.16), p.x.add(p.y).mul(0.055)).toVar();
+  const diag = abs(p.x.mul(0.82).add(p.y.mul(0.58)).sub(0.72));
+  r = r.add(vec3(0.20, 0.10, 0.02).mul(float(1.0).sub(step(float(0.035), diag)))).toVar();
+  const checker = step(float(0.5),
+    fract(floor(p.x.mul(24.0)).add(floor(p.y.mul(18.0))).mul(0.5)));
+  const inCorner = step(p.x, float(0.32)).mul(step(float(0.68), p.y));
+  r = r.add(vec3(0.12, 0.03, 0.10).mul(checker).mul(inCorner)).toVar();
+  const d = length(p.sub(vec2(0.68, 0.60)).mul(vec2(1.0, 1.18)));
+  const disc = float(1.0).sub(smoothstep(float(0.145), float(0.155), d));
+  r = r.add(vec3(9.0, 6.0, 2.5).mul(disc)).toVar();
+  const core = float(1.0).sub(smoothstep(float(0.035), float(0.045), d));
+  r = r.add(vec3(14.0, 9.0, 5.0).mul(core)).toVar();
+  const bar = step(abs(p.y.sub(0.18)), float(0.025))
+    .mul(step(float(0.15), p.x)).mul(step(p.x, float(0.85)));
+  r = r.add(vec3(1.6, 0.45, 0.25).mul(bar)).toVar();
+  let alpha = mix(float(-0.5), float(0.0), step(float(0.25), p.x)).toVar();
+  alpha = mix(alpha, float(0.5), step(float(0.50), p.x)).toVar();
+  alpha = mix(alpha, float(2.0), step(float(0.75), p.x)).toVar();
+  return vec4(r, alpha);
+}
+
+function makeTslWorld() {
+  const scene = new NodeScene();
+  const camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+  camera.position.z = 1;
+  const material = new MeshBasicNodeMaterial({
+    name: "P5 display synthetic HDR TSL",
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+    fog: false,
+    blending: NodeNoBlending
+  });
+  material.fragmentNode = Fn(() => worldPatternTSL(), "vec4")();
+  const mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  return { scene, camera, material };
+}
+
+const DISPLAY_PATTERN_GLSL = /* glsl */`
+  precision highp float;
+  varying vec2 vUv;
+  void main() {
+    vec2 px = vUv * vec2(${width}.0, ${height}.0);
+    vec3 c = vec3(24.0 + vUv.x * 150.0, 32.0 + vUv.y * 140.0,
+                  40.0 + (vUv.x + vUv.y) * 45.0) / 255.0;
+    float diag = 1.0 - step(2.5, abs(px.x * 0.82 + px.y * 0.58 - (${width}.0 * 0.55 + 0.37)));
+    c = mix(c, vec3(245.0, 220.0, 40.0) / 255.0, diag);
+    float vertical = 1.0 - step(1.5, abs(px.x - ${width}.0 * 0.30));
+    c = mix(c, vec3(20.0, 240.0, 235.0) / 255.0, vertical);
+    float horizontal = 1.0 - step(1.5, abs(px.y - ${height}.0 * 0.72));
+    c = mix(c, vec3(250.0, 40.0, 210.0) / 255.0, horizontal);
+    float checker = step(px.x, ${width}.0 * 0.34) * step(${height}.0 * 0.66, px.y) *
+      step(0.25, fract((floor(px.x / 8.0) + floor(px.y / 8.0)) * 0.5));
+    c = mix(c, vec3(235.0) / 255.0, checker);
+    float rect = step(${width}.0 * 0.62, px.x) * step(px.x, ${width}.0 * 0.90) *
+      step(${height}.0 * 0.18, px.y) * step(px.y, ${height}.0 * 0.46);
+    c = mix(c, vec3(215.0, 120.0, 35.0) / 255.0, rect);
+    gl_FragColor = vec4(c, 1.0);
+  }
+`;
+
+function displayPatternTSL() {
+  const p = uv().toVar();
+  const px = p.mul(vec2(width, height)).toVar();
+  let c = vec3(
+    float(24.0).add(p.x.mul(150.0)),
+    float(32.0).add(p.y.mul(140.0)),
+    float(40.0).add(p.x.add(p.y).mul(45.0))).div(255.0).toVar();
+  const diag = float(1.0).sub(step(float(2.5),
+    abs(px.x.mul(0.82).add(px.y.mul(0.58)).sub(width * 0.55 + 0.37))));
+  c = mix(c, vec3(245.0, 220.0, 40.0).div(255.0), diag).toVar();
+  const vertical = float(1.0).sub(step(float(1.5), abs(px.x.sub(width * 0.30))));
+  c = mix(c, vec3(20.0, 240.0, 235.0).div(255.0), vertical).toVar();
+  const horizontal = float(1.0).sub(step(float(1.5), abs(px.y.sub(height * 0.72))));
+  c = mix(c, vec3(250.0, 40.0, 210.0).div(255.0), horizontal).toVar();
+  const checker = step(px.x, float(width * 0.34))
+    .mul(step(float(height * 0.66), px.y))
+    .mul(step(float(0.25), fract(floor(px.x.div(8.0)).add(floor(px.y.div(8.0))).mul(0.5))));
+  c = mix(c, vec3(235.0, 235.0, 235.0).div(255.0), checker).toVar();
+  const rect = step(float(width * 0.62), px.x).mul(step(px.x, float(width * 0.90)))
+    .mul(step(float(height * 0.18), px.y)).mul(step(px.y, float(height * 0.46)));
+  c = mix(c, vec3(215.0, 120.0, 35.0).div(255.0), rect).toVar();
+  return vec4(c, 1.0);
+}
+
+function makeDisplaySourceScene() {
+  if (impl === "glsl") {
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    const material = new THREE.ShaderMaterial({
+      name: "P5 display synthetic post source GLSL",
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: DISPLAY_PATTERN_GLSL,
+      depthTest: false,
+      depthWrite: false
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    return { scene, camera, material };
+  }
+  const scene = new NodeScene();
+  const camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+  camera.position.z = 1;
+  const material = new MeshBasicNodeMaterial({
+    name: "P5 display synthetic post source TSL",
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+    fog: false,
+    blending: NodeNoBlending
+  });
+  material.fragmentNode = Fn(() => displayPatternTSL(), "vec4")();
+  const mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  return { scene, camera, material };
+}
+
+function makeDisplayTarget() {
+  if (impl === "glsl") {
+    return new THREE.WebGLRenderTarget(width, height, {
+      type: THREE.UnsignedByteType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false
+    });
+  }
+  return new NodeRenderTarget(width, height, {
+    type: NodeUnsignedByteType,
+    format: NodeRGBAFormat,
+    minFilter: NodeLinearFilter,
+    magFilter: NodeLinearFilter,
+    depthBuffer: false,
+    stencilBuffer: false
+  });
+}
+
+function makeHdrTarget() {
+  if (impl === "glsl") {
+    return new THREE.WebGLRenderTarget(width, height, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: true,
+      stencilBuffer: false,
+      colorSpace: THREE.LinearSRGBColorSpace
+    });
+  }
+  return new NodeRenderTarget(width, height, {
+    type: NodeHalfFloatType,
+    format: NodeRGBAFormat,
+    minFilter: NodeNearestFilter,
+    magFilter: NodeNearestFilter,
+    depthBuffer: true,
+    stencilBuffer: false,
+    colorSpace: NodeLinearSRGBColorSpace
+  });
+}
+
+function makePassQuad() {
+  if (impl === "glsl") {
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), null);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    return { scene, camera, mesh };
+  }
+  const scene = new NodeScene();
+  const camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+  camera.position.z = 1;
+  const mesh = new NodeMesh(new NodePlaneGeometry(2, 2), null);
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  return { scene, camera, mesh };
+}
+
+try {
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: true,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(width, height, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  const glslDisplay = globalThis.__DISPLAY_GLSL;
+  const world = impl === "glsl" ? makeGlslWorld() : makeTslWorld();
+  let renderFrame = null;
+  let materialTypes = {};
+
+  if (mode === "dither" || mode === "fxaa") {
+    // Production post stages are fed render-target textures, never a raw
+    // uploaded image; the direct proof uses that same source kind so the
+    // render-target orientation convention is part of the test.
+    const sourceScene = makeDisplaySourceScene();
+    const source = makeDisplayTarget();
+    const stage = impl === "glsl"
+      ? (mode === "dither" ? glslDisplay.createDither(THREE, renderer, {}) : glslDisplay.createAntialias(THREE, renderer, {}))
+      : (mode === "dither" ? createDitherTSL(renderer, {}) : createAntialiasTSL(renderer, {}));
+    materialTypes.stage = stage.material.type;
+    renderFrame = () => {
+      renderer.setRenderTarget(source);
+      renderer.clear();
+      renderer.render(sourceScene.scene, sourceScene.camera);
+      if (mode === "dither") stage.begin(source.texture, FIXED_DITHER_TIME);
+      else stage.begin(source.texture, width, height);
+      renderer.setRenderTarget(null);
+      renderer.render(stage.scene, stage.camera);
+    };
+  } else if (mode === "bloom" || mode === "bloom4") {
+    const levels = mode === "bloom4" ? 4 : 3;
+    const bloom = impl === "glsl"
+      ? glslDisplay.createBloom(THREE, renderer, { levels })
+      : createBloomTSL(renderer, { levels });
+    const hdr = makeHdrTarget();
+    const quad = makePassQuad();
+    materialTypes.combine = bloom.combine.type;
+    renderFrame = () => {
+      renderer.setRenderTarget(hdr);
+      renderer.clear();
+      renderer.render(world.scene, world.camera);
+      const combined = bloom.prepare(hdr.texture, glslDisplay.defaultExposure, width, height);
+      quad.mesh.material = combined;
+      renderer.setRenderTarget(null);
+      renderer.render(quad.scene, quad.camera);
+    };
+  } else {
+    const chainOptions = mode === "tone"
+      ? { bloom: { enabled: false }, dither: { enabled: false }, antialias: { enabled: false } }
+      : mode === "bloomdither"
+        ? { antialias: { enabled: false } }
+        : mode === "bloomfxaa"
+          ? { dither: { enabled: false } }
+          : {};
+    const chain = impl === "glsl"
+      ? glslDisplay.createDisplayChain(THREE, renderer, chainOptions)
+      : createDisplayChainTSL(renderer, chainOptions);
+    if (chain.dither?.enabled) {
+      const begin = chain.dither.begin;
+      chain.dither.begin = (texture, _time) => begin(texture, FIXED_DITHER_TIME);
+    }
+    materialTypes.display = chain.material.type;
+    materialTypes.bloomCombine = chain.bloom.combine.type;
+    materialTypes.dither = chain.dither.material.type;
+    materialTypes.antialias = chain.antialias.material.type;
+    renderFrame = () => chain.render(world.scene, world.camera);
+    window.__p5ChainExposure = chain.exposure;
+  }
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderFrame();
+  }
+
+  window.__p5 = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    mode,
+    width,
+    height,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    glslDefaultExposure: glslDisplay.defaultExposure,
+    tslDefaultExposure: TSL_DEFAULT_EXPOSURE,
+    chainExposure: window.__p5ChainExposure ?? null,
+    materialTypes,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5 display ${impl}/${mode}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(renderFrame);
+} catch (e) {
+  window.__p5 = { done: true, error: String(e?.stack || e), revision: REVISION, impl, mode };
+  status.textContent = "P5 display error: " + window.__p5.error;
+}
+</script>
+</body>
+</html>

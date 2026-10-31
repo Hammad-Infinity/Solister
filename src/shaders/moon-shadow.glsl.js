@@ -1,3 +1,20 @@
+// One source of truth for the Moon's Earth-shadow factor. The production
+// material patch below and tools/p3moonshadow.mjs both read this. The Sun is
+// at the world origin in this production patch, hence earthToSun below.
+const MOON_EARTH_SHADOW_GLSL = `
+float moonEarthShadowFactor(vec3 fragWorld, vec3 earthPos, float earthRadius) {
+    vec3 fragFromEarth = fragWorld - earthPos;
+    vec3 earthToSun = normalize(-earthPos);
+    float alongSun = dot(fragFromEarth, earthToSun);
+    float earthShadow = 0.0;
+    if (alongSun < 0.0) {
+        vec3 perp = fragFromEarth - alongSun * earthToSun;
+        if (length(perp) < earthRadius) earthShadow = 1.0;
+    }
+    return mix(1.0, 0.08, earthShadow);
+}
+`;
+
 function setupMaterialEffects() {
     const saturnMesh = objectRegistry["saturn"];
     const saturnRingMesh = objectRegistry["saturn-ring"];
@@ -52,8 +69,8 @@ function setupMaterialEffects() {
         shader.uniforms.uEarthRadius = moonMat.userData.uEarthRadius;
         shader.vertexShader = "varying vec3 vMoonWorldPos;\n" + shader.vertexShader;
         shader.vertexShader = shader.vertexShader.replace("void main() {", `void main() {\n                vMoonWorldPos = ( modelMatrix * vec4( position, 1.0 ) ).xyz;`);
-        shader.fragmentShader = "uniform vec3 uEarthPos;\nuniform float uEarthRadius;\nvarying vec3 vMoonWorldPos;\n" + shader.fragmentShader;
-        shader.fragmentShader = shader.fragmentShader.replace("#include <lights_fragment_end>", `#include <lights_fragment_end>\n            vec3 _fragFromEarth = vMoonWorldPos - uEarthPos;\n            vec3 _earthToSun    = normalize( -uEarthPos );\n            float _alongSun     = dot( _fragFromEarth, _earthToSun );\n            float _earthShadow  = 0.0;\n            if ( _alongSun < 0.0 ) {\n                vec3 _perp = _fragFromEarth - _alongSun * _earthToSun;\n                if ( length( _perp ) < uEarthRadius ) {\n                    _earthShadow = 1.0;\n                }\n            }\n            reflectedLight.directDiffuse *= mix( 1.0, 0.08, _earthShadow );`);
+        shader.fragmentShader = "uniform vec3 uEarthPos;\nuniform float uEarthRadius;\nvarying vec3 vMoonWorldPos;\n" + MOON_EARTH_SHADOW_GLSL + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace("#include <lights_fragment_end>", `#include <lights_fragment_end>\n            reflectedLight.directDiffuse *= moonEarthShadowFactor(vMoonWorldPos, uEarthPos, uEarthRadius);`);
     };
     moonMat.needsUpdate = true;
     earthMat = earthMesh.material;

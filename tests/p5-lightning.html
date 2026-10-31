@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e21 — lightning bolt materials GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e21 lightning starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { PlanetWeather } from "../src/bodies/planets/planet-weather.js";
+import { createLightningBolt, deriveLightningMaterial } from "../src/bodies/planets/planet-weather.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  BufferGeometry as NodeBufferGeometry,
+  BufferAttribute as NodeBufferAttribute,
+  SphereGeometry as NodeSphereGeometry,
+  MeshBasicMaterial as NodeBasicMaterial,
+  CanvasTexture as NodeCanvasTexture,
+  Matrix3 as NodeMatrix3,
+  Color as NodeColor,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// The lightning bolt ShaderMaterial pair (makeMaterial's glow
+// and core) against the TSL factory. Both pages run
+// production's real PlanetWeather over one stub body with the
+// session seed pinned, so the seeded strike stream is
+// identical; makeMaterial's state and initial uniforms are
+// checked bit-exact against deriveLightningMaterial in page
+// before the drive. The class's own update() is stepped at
+// fixed scripted times until a bolt is mid-flash, the state is
+// frozen, and the render camera is aimed at the frozen bolt
+// (computed from its geometry, identically on both pages —
+// the digest in the page meta proves the drive matched). The
+// classic side renders the entry's glow/core meshes exactly
+// as built; the node side renders createLightningBolt slots
+// over geometry rebuilt from the same attribute arrays, fed
+// the live uniform values, under a log-depth renderer on
+// both sides (production's LDB chunks vs the port's
+// depthNode, exercised by the occluder case).
+// Cases:
+//   0 earth gate, rgb mask channel
+//   1 earth gate, alpha mask channel (different geography)
+//   2 earth + log-depth occluder crossing the bolt
+//   3 jupiter forks (no gate, branch tint)
+//   4 earth close-in, cloud opacity 0.55
+const CASES = [
+  { kind: "earth-gate-rgb", key: "earth", channel: "rgb", aimAltKm: 45, aimSideKm: 130 },
+  { kind: "earth-gate-alpha", key: "earth", channel: "alpha", aimAltKm: 45, aimSideKm: 130 },
+  { kind: "earth-occluder-logdepth", key: "earth", channel: "rgb", aimAltKm: 45, aimSideKm: 130, occluder: true },
+  { kind: "jupiter-forks", key: "jupiter", aimAltKm: 60, aimSideKm: 260 },
+  { kind: "earth-closeup-dim", key: "earth", channel: "rgb", aimAltKm: 25, aimSideKm: 70, cloudOpacity: 0.55 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5ltg = { done: false, error: null };
+
+const BODY_R = 10;
+const SUN_POS = [200, 60, 120];
+const PROFILES = {
+  earth: { derived: { layers: [{ composition: { N2: 0.78, O2: 0.21, Ar: 0.01 }, temperatureK: 288, pressureBottomPa: 101325, meanMolarMass: 28.97, bottomKm: 0, topKm: 12 }] } },
+  jupiter: { derived: { layers: [{ composition: { H2: 0.9, He: 0.1 }, temperatureK: 165, pressureBottomPa: 100000, meanMolarMass: 2.2, bottomKm: 0, topKm: 50 }] } }
+};
+const RADIUS_KM = { earth: 6371, jupiter: 69911 };
+
+function paintDeckCanvas() {
+  const w = 512, h = 256;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d");
+  const img = ctx.createImageData(w, h);
+  const blob = (u, v, cu, cv2, r) => {
+    const du = Math.min(Math.abs(u - cu), 1 - Math.abs(u - cu));
+    const dv = v - cv2;
+    return Math.max(0, 1 - Math.sqrt(du * du * 2.0 + dv * dv) / r);
+  };
+  // Painted in linear density, stored sRGB: the GPU gate
+  // decodes the rgb channels (production's deck texture is
+  // SRGB), so the values below are what the gate's
+  // smoothstep(0.38, 0.60) actually sees -- baseline 0.68
+  // passes fully, holes at 0.08 cut the ribbon. The CPU
+  // strike sampler reads the raw bytes, whose ordering the
+  // same field preserves. Alpha is not decoded by either
+  // side and is painted raw.
+  const toSrgbByte = (lin) => {
+    const c = Math.max(0, Math.min(1, lin));
+    return Math.round(255 * (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055));
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const u = x / w, v = y / h;
+      let rgb = 0.68 + 0.27 * Math.max(blob(u, v, 0.52, 0.46, 0.20), blob(u, v, 0.18, 0.62, 0.12));
+      rgb -= 0.60 * Math.max(blob(u, v, 0.66, 0.55, 0.10), blob(u, v, 0.38, 0.30, 0.08));
+      let a = 0.62 + 0.33 * blob(u, v, 0.28, 0.40, 0.16) - 0.47 * blob(u, v, 0.55, 0.60, 0.09);
+      const p = (y * w + x) * 4;
+      img.data[p] = toSrgbByte(rgb);
+      img.data[p + 1] = toSrgbByte(rgb * 0.92);
+      img.data[p + 2] = toSrgbByte(rgb * 0.85);
+      img.data[p + 3] = Math.round(255 * Math.max(0, Math.min(1, a)));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+function makeDeckTexture(T) {
+  const tex = new T.CanvasTexture(paintDeckCanvas());
+  tex.colorSpace = T.SRGBColorSpace;
+  tex.wrapS = T.RepeatWrapping;
+  tex.wrapT = T.ClampToEdgeWrapping;
+  tex.offset.set(0.25, 0);
+  tex.userData.cloudMaskChannel = cfg.channel || "rgb";
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function buildSystem() {
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+
+  const bodyMat = new THREE.MeshBasicMaterial({ color: 0x141a26 });
+  bodyMat.visible = false;
+  const body = new THREE.Mesh(new THREE.SphereGeometry(BODY_R, 48, 32), bodyMat);
+  body.name = cfg.key;
+  const sun = new THREE.Object3D();
+  sun.position.set(...SUN_POS);
+  const objectRegistry = { sun, [cfg.key]: body };
+
+  const driveCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 4000);
+  driveCamera.position.set(0, 3.5, 30);
+  driveCamera.lookAt(0, 0, 0);
+  driveCamera.updateProjectionMatrix();
+  driveCamera.updateMatrixWorld(true);
+
+  const deckTex = makeDeckTexture(THREE);
+  const glowUniforms = {
+    uLightningFlash: { value: new Float32Array(12 * 4) },
+    uLightningFlashCount: { value: 0 }
+  };
+  const rendererStub = {
+    domElement: { clientHeight: size },
+    getDrawingBufferSize: (v) => v.set(size, size)
+  };
+  const weather = new PlanetWeather({
+    THREE,
+    objectRegistry,
+    camera: driveCamera,
+    renderer: rendererStub,
+    getLightningEnabled: () => true,
+    getAtmosphereProfile: (key) => PROFILES[key] || null,
+    getRadiusKm: (key) => RADIUS_KM[key] || 6371,
+    getEarthCloudTexture: () => deckTex,
+    getEarthCloudOpacity: () => cfg.cloudOpacity ?? 1,
+    getEarthCloudGlowMaterial: () => ({ uniforms: glowUniforms }),
+    getEarthWeatherField: () => null,
+    getSurfaceHeightKm: () => 0
+  });
+  weather.sessionSeed = 987654321;
+  return { body, sun, driveCamera, deckTex, weather, entry: null, frozenNow: 0, limbDelta: 0 };
+}
+
+function fail(msg) { throw new Error(msg); }
+function sameNum(a, b, what) {
+  if (a !== b) fail(`derive ${what}: live ${a} != derived ${b}`);
+}
+function sameArr(a, b, what) {
+  if (!a || !b || a.length !== b.length) fail(`derive ${what}: shape`);
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) fail(`derive ${what}[${i}]: live ${a[i]} != derived ${b[i]}`);
+}
+
+function checkDerivations(sys) {
+  const entry = sys.weather.getEntry(cfg.key, sys.body, 0);
+  sys.entry = entry;
+  const isEarth = cfg.key === "earth";
+  const calls = [
+    { name: "glow", color: entry.gasTint, widthPx: isEarth ? 6.5 : 3.4, alpha: 0, branchColor: isEarth ? 0xFF49D7 : entry.gasTint },
+    { name: "core", color: 16777215, widthPx: isEarth ? 1.5 : 0.9, alpha: 0, branchColor: isEarth ? 0xFFE0FA : 16777215 }
+  ];
+  for (const slot of entry.slots) {
+    for (const call of calls) {
+      const mat = slot[call.name].material;
+      const d = deriveLightningMaterial(call);
+      sameNum(mat.transparent, d.transparent, "transparent");
+      sameNum(mat.depthTest, d.depthTest, "depthTest");
+      sameNum(mat.depthWrite, d.depthWrite, "depthWrite");
+      sameNum(mat.side, d.side, "side");
+      sameNum(mat.blending, d.blending, "blending");
+      sameNum(mat.toneMapped, d.toneMapped, "toneMapped");
+      sameNum(mat.fog, d.fog, "fog");
+      const u = mat.uniforms, du = d.uniforms;
+      sameArr([u.uViewport.value.x, u.uViewport.value.y], du.viewport, "uViewport");
+      sameNum(u.uHalfWidthPx.value, du.halfWidthPx, "uHalfWidthPx");
+      sameArr([u.uColor.value.r, u.uColor.value.g, u.uColor.value.b], du.color, "uColor");
+      sameArr([u.uBranchColor.value.r, u.uBranchColor.value.g, u.uBranchColor.value.b], du.branchColor, "uBranchColor");
+      sameNum(u.uAlpha.value, du.alpha, "uAlpha");
+      if (u.uEarthCloudTexture.value !== du.earthCloudTexture) fail("derive uEarthCloudTexture not null");
+      sameArr(Array.from(u.uEarthCloudTextureMatrix.value.elements),
+        [1, 0, 0, 0, 1, 0, 0, 0, 1], "uEarthCloudTextureMatrix identity");
+      if (!du.earthCloudTextureMatrixIsIdentity) fail("derive matrix flag");
+      sameNum(u.uEarthCloudUseAlpha.value, du.earthCloudUseAlpha, "uEarthCloudUseAlpha");
+      sameNum(u.uEarthCloudGate.value, du.earthCloudGate, "uEarthCloudGate");
+      if (mat.vertexShader !== sys.weather.shaders.vertexShader) fail("vertex shader not the shared pair");
+      if (mat.fragmentShader !== sys.weather.shaders.fragmentShader) fail("fragment shader not the shared pair");
+    }
+  }
+}
+
+function hashArray(arr) {
+  let s = 0, w = 0;
+  for (let i = 0; i < arr.length; i++) { s += arr[i]; w += arr[i] * ((i % 97) + 1); }
+  return [Number(s.toPrecision(12)), Number(w.toPrecision(12))];
+}
+
+function drive(sys) {
+  const entry = sys.entry;
+  const dt = 1 / 240;
+  let t = 0, frozen = -1;
+  while (t <= 60) {
+    sys.weather.update(t, 1);
+    let best = 0;
+    for (const slot of entry.slots) {
+      if (slot.event) best = Math.max(best, slot.glow.material.uniforms.uAlpha.value);
+    }
+    if (best > 0.3) { frozen = t; break; }
+    t += dt;
+  }
+  if (frozen < 0) fail(`no strike reached alpha 0.3 by t=60 (strikes=${sys.weather.stats.strikes})`);
+  sys.frozenNow = frozen;
+
+  // Aim at the strongest frozen bolt, from its own geometry.
+  let aimSlot = null, aimAlpha = -1;
+  for (const slot of entry.slots) {
+    const a = slot.glow.material.uniforms.uAlpha.value;
+    if (slot.event && a > aimAlpha) { aimAlpha = a; aimSlot = slot; }
+  }
+  const count = aimSlot.geometry.drawRange.count;
+  const verts = (count / 6) * 4;
+  const c = new THREE.Vector3();
+  for (let i = 0; i < verts; i++) {
+    c.x += aimSlot.positions[i * 3];
+    c.y += aimSlot.positions[i * 3 + 1];
+    c.z += aimSlot.positions[i * 3 + 2];
+  }
+  c.multiplyScalar(1 / verts);
+  const n = c.clone().normalize();
+  const tangent = new THREE.Vector3(0, 1, 0).cross(n);
+  if (tangent.lengthSq() < 1e-6) tangent.set(1, 0, 0);
+  tangent.normalize();
+  const radiusKm = RADIUS_KM[cfg.key];
+  // Mostly-side view at bolt altitude: the channel runs
+  // radially, so a near-radial aim foreshortens it to a knot.
+  const camPos = n.clone().multiplyScalar(BODY_R * (1 + cfg.aimAltKm / radiusKm))
+    .addScaledVector(tangent, BODY_R * (cfg.aimSideKm / radiusKm));
+  sys.aim = { centroid: c, camPos };
+
+  sys.digest = {
+    key: cfg.key,
+    frozenNow: Number(frozen.toPrecision(12)),
+    strikes: sys.weather.stats.strikes,
+    aim: [c.x, c.y, c.z].map(v => Number(v.toPrecision(10))),
+    camPos: [camPos.x, camPos.y, camPos.z].map(v => Number(v.toPrecision(10))),
+    slots: entry.slots.map(slot => ({
+      draw: slot.geometry.drawRange.count,
+      glowAlpha: Number(slot.glow.material.uniforms.uAlpha.value.toPrecision(12)),
+      coreAlpha: Number(slot.core.material.uniforms.uAlpha.value.toPrecision(12)),
+      hp: hashArray(slot.positions),
+      ho: hashArray(slot.others),
+      hs: hashArray(slot.strengths),
+      hb: hashArray(slot.branches)
+    }))
+  };
+}
+
+function makeRenderCamera(CamCls, sys) {
+  const camera = new CamCls(40, 1, 0.002, 4000);
+  camera.position.copy(sys.aim.camPos);
+  camera.lookAt(sys.aim.centroid.x, sys.aim.centroid.y, sys.aim.centroid.z);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  return camera;
+}
+
+function occluderFor(NS, sys) {
+  const camPos = sys.aim.camPos;
+  const target = sys.aim.centroid;
+  const mid = camPos.clone().lerp(target, 0.45);
+  const dir = target.clone().sub(camPos);
+  const dist = dir.length();
+  const side = new THREE.Vector3(0, 1, 0).cross(dir.clone().normalize()).normalize();
+  // Small against the frame and nearly on the aim line, so
+  // its rim cuts across the bolt: the bolt stays visible
+  // around it and the occlusion edge through the ribbon is
+  // what the two depth paths have to agree on.
+  const r = dist * 0.055;
+  const mat = new NS.MeshBasicMaterial({ color: 0x3d4d6e });
+  const mesh = new NS.Mesh(new NS.SphereGeometry(r, 32, 24), mat);
+  mesh.position.copy(mid).addScaledVector(side, r * 0.35);
+  mesh.renderOrder = -2;
+  mesh.updateWorldMatrix(true, false);
+  return mesh;
+}
+
+function buildGlslScene(sys) {
+  const scene = new THREE.Scene();
+  scene.add(sys.body);
+  scene.add(sys.sun);
+  sys.body.updateWorldMatrix(true, true);
+  if (cfg.occluder) scene.add(occluderFor(THREE, sys));
+  const camera = makeRenderCamera(THREE.PerspectiveCamera, sys);
+  return { scene, camera };
+}
+
+function nodeGeometryFrom(slot) {
+  const g = new NodeBufferGeometry();
+  const put = (name, arr, n) => g.setAttribute(name, new NodeBufferAttribute(arr.slice(), n));
+  put("position", slot.positions, 3);
+  put("aOther", slot.others, 3);
+  put("aSide", slot.geometry.getAttribute("aSide").array, 1);
+  put("aStrength", slot.strengths, 1);
+  put("aBranch", slot.branches, 1);
+  g.setIndex(new NodeBufferAttribute(slot.geometry.index.array.slice(), 1));
+  g.setDrawRange(0, slot.geometry.drawRange.count);
+  return g;
+}
+
+function buildTslScene(sys) {
+  const scene = new NodeScene();
+  const entry = sys.entry;
+  const nodeDeckTex = cfg.key === "earth" ? makeDeckTexture(NodeNS) : null;
+  const bodyMat = new NodeBasicMaterial({ color: 0x141a26 });
+  bodyMat.visible = false;
+  const body = new NodeMesh(new NodeSphereGeometry(BODY_R, 48, 32), bodyMat);
+  scene.add(body);
+
+  for (const slot of entry.slots) {
+    const geometry = nodeGeometryFrom(slot);
+    for (const srcMesh of [slot.glow, slot.core]) {
+      const u = srcMesh.material.uniforms;
+      const d = deriveLightningMaterial({
+        color: u.uColor.value, widthPx: u.uHalfWidthPx.value,
+        alpha: u.uAlpha.value, branchColor: u.uBranchColor.value
+      });
+      const material = new MeshBasicNodeMaterial({ name: "P5e21 lightning TSL" });
+      material.transparent = d.transparent;
+      material.depthTest = d.depthTest;
+      material.depthWrite = d.depthWrite;
+      material.side = d.side;
+      material.blending = d.blending;
+      material.toneMapped = d.toneMapped;
+      const slots = createLightningBolt({
+        color: [u.uColor.value.r, u.uColor.value.g, u.uColor.value.b],
+        branchColor: [u.uBranchColor.value.r, u.uBranchColor.value.g, u.uBranchColor.value.b],
+        halfWidthPx: u.uHalfWidthPx.value,
+        alpha: u.uAlpha.value,
+        viewport: [u.uViewport.value.x, u.uViewport.value.y],
+        earthCloudTexture: nodeDeckTex,
+        earthCloudTextureMatrix: nodeDeckTex
+          ? new NodeMatrix3().fromArray(u.uEarthCloudTextureMatrix.value.elements)
+          : undefined,
+        earthCloudUseAlpha: u.uEarthCloudUseAlpha.value,
+        earthCloudGate: u.uEarthCloudGate.value
+      });
+      material.vertexNode = slots.vertexNode;
+      material.colorNode = slots.colorNode;
+      material.depthNode = slots.depthNode;
+      const mesh = new NodeMesh(geometry, material);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = srcMesh.renderOrder;
+      body.add(mesh);
+    }
+  }
+  body.updateWorldMatrix(true, true);
+  if (cfg.occluder) scene.add(occluderFor(NodeNS, sys));
+  const camera = makeRenderCamera(NodePerspectiveCamera, sys);
+  return { scene, camera };
+}
+
+try {
+  const sys = buildSystem();
+  checkDerivations(sys);
+  drive(sys);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(sys) : buildTslScene(sys);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5ltg = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null,
+    digest: sys.digest
+  };
+  status.textContent = `P5e21 lightning ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind} frozen=${sys.digest.frozenNow}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5ltg = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e21 lightning error: " + window.__p5ltg.error;
+}
+</script>
+</body>
+</html>

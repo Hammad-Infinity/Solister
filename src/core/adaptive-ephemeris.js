@@ -191,10 +191,11 @@ export class AdaptiveEphemerisLayer extends SolarEphemerisLayer {
         this.lastStepSeconds = (shown - ms) / 1e3;
         this.update(shown, options);
         this.returnedEpoch = shown;
-        this.blocks = this.blocks.filter(x => x.endMs >= shown - 1);
+        const reverse = this.effectiveRate < 0;
+        this.blocks = this.blocks.filter(x => reverse ? x.startMs <= shown + 1 : x.endMs >= shown - 1);
         if (!this.busy && !this.error) {
             const current = this.blockAt(shown), last = this.blocks[this.blocks.length - 1];
-            if (!current) this.requestBlock(Math.max(UTC_START, shown - Math.min(1728e5, Math.max(36e5, Math.abs(requestedRate) * 6e3))), requestedRate); else if (this.effectiveRate < 0 && (!this.blocks[0] || shown - this.blocks[0].startMs < (this.blocks[0].endMs - this.blocks[0].startMs) * .75) && this.blocks.length < 3) this.requestBlockBack(this.blocks[0] ? this.blocks[0].startMs : shown, requestedRate); else if (!paused && (!last || last.endMs - shown < (last.endMs - last.startMs) * .75) && this.blocks.length < 3) this.requestBlock(last.endMs, requestedRate); else if (this.pendingPaths.length) this.post("trajectory", {
+            if (!current) this.requestBlock(Math.max(UTC_START, shown - Math.min(1728e5, Math.max(36e5, Math.abs(requestedRate) * 6e3))), requestedRate); else if (reverse && (!this.blocks[0] || shown - this.blocks[0].startMs < (this.blocks[0].endMs - this.blocks[0].startMs) * .75) && this.blocks.length < 3) this.requestBlockBack(this.blocks[0] ? this.blocks[0].startMs : shown, requestedRate); else if (!reverse && !paused && (!last || last.endMs - shown < (last.endMs - last.startMs) * .75) && this.blocks.length < 3) this.requestBlock(last.endMs, requestedRate); else if (this.pendingPaths.length) this.post("trajectory", {
                 key: this.pendingPaths[0],
                 et: this.snapshot.et
             });

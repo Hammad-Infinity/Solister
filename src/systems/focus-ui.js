@@ -176,8 +176,15 @@ function showFocusCard(bodyInfo) {
 
 let planetVisuals = null;
 
+// Marker layout writes SVG attributes and styles for every body, moon and comet
+// on the list, every frame. Capping it near 30 Hz halves that work and the
+// difference is invisible; hover and click still respond immediately because they are separate events.
+let _lastVisualsAt = 0;
 function updatePlanetVisuals() {
     if (!planetVisuals) planetVisuals = createPlanetVisuals();
+    const now = performance.now();
+    if (now - _lastVisualsAt < 30) return;
+    _lastVisualsAt = now;
     planetVisuals.update();
 }
 

@@ -1,4 +1,5 @@
 import { SKY_RADIUS } from "./sky-maps.js";
+import { eqUnitToScene, sceneToRaDec } from "./sky-frame.js";
 
 const [constellationDataModule, motionDataModule, gaiaDataModule] = await Promise.all([
     import("../../data/sky/constellation-data.js").catch(() => ({})),
@@ -35,12 +36,6 @@ const CONSTELLATION_DATA_AVAILABLE = !!(
 );
 
 const DEG = Math.PI / 180;
-
-const EPS = 23.4392911 * DEG;
-
-const COS_EPS = Math.cos(EPS);
-
-const SIN_EPS = Math.sin(EPS);
 
 const STAR_SEED = 12648430;
 
@@ -89,16 +84,13 @@ function hslToRgb(h, s, l) {
 }
 
 export function sceneToEq(s, out) {
-    const X = s.x;
-    const Z = s.y;
-    const Y = -s.z;
-    const x = X;
-    const y = Y * COS_EPS - Z * SIN_EPS;
-    const z = Y * SIN_EPS + Z * COS_EPS;
-    out.ra = (Math.atan2(y, x) / DEG + 360) % 360;
-    out.dec = Math.asin(Math.max(-1, Math.min(1, z))) / DEG;
+    const result = sceneToRaDec(s, _sceneToEqScratch);
+    out.ra = result.ra;
+    out.dec = result.dec;
     return out;
 }
+
+const _sceneToEqScratch = { x: 0, y: 0, z: 0 };
 
 export class ConstellationLayer {
     constructor({THREE: THREE, scene: scene, CSS2DObject: CSS2DObject, radius: radius = SKY_RADIUS}) {
@@ -161,13 +153,7 @@ export class ConstellationLayer {
         return out.set(Math.cos(d) * Math.cos(a), Math.cos(d) * Math.sin(a), Math.sin(d));
     }
     _sceneVecFromUnit(eqUnit, out) {
-        const x = eqUnit.x;
-        const y = eqUnit.y;
-        const z = eqUnit.z;
-        const X = x;
-        const Y = y * COS_EPS + z * SIN_EPS;
-        const Z = -y * SIN_EPS + z * COS_EPS;
-        return out.set(X, Z, -Y);
+        return eqUnitToScene(eqUnit, out);
     }
     _starScenePosition(index, year, out) {
         const masToRad = Math.PI / (180 * 3600 * 1e3);
@@ -696,17 +682,11 @@ export class ConstellationLayer {
         if (!this._pic || !Number.isFinite(ra) || !Number.isFinite(dec)) return null;
         const a = ra * DEG;
         const d = dec * DEG;
-        const x = Math.cos(d) * Math.cos(a);
-        const y = Math.cos(d) * Math.sin(a);
-        const z = Math.sin(d);
-        const X = x;
-        const Y = y * COS_EPS + z * SIN_EPS;
-        const Z = -y * SIN_EPS + z * COS_EPS;
-        const v = {
-            x: X,
-            y: Z,
-            z: -Y
-        };
+        const v = eqUnitToScene({
+            x: Math.cos(d) * Math.cos(a),
+            y: Math.cos(d) * Math.sin(a),
+            z: Math.sin(d)
+        }, { x: 0, y: 0, z: 0 });
         const {centers: centers, bases: bases, polys: polys} = this._pic;
         const hit = [];
         for (let i = 0; i < 88; i++) {

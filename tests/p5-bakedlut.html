@@ -1,0 +1,44 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Bruneton baked table loader probe</title>
+<script type="importmap">{"imports":{"three":"../vendor/three-r186/three.module.js"}}</script>
+<script src="../src/render/atmosphere/bruneton-luts.js"></script><script src="../src/render/atmosphere/lut-binary.js"></script></head><body><script type="module">
+import * as THREE from 'three';
+window.probe={done:false};
+try {
+ const fault=new URLSearchParams(location.search).get('fault')||'';
+ const params={Rg:6360,Rt:6420,HR:8,HM:1.2,betaR:[.0058,.0135,.0331],betaMSca:[.004,.004,.004],betaMEx:[.0044,.0044,.0044],mieG:.8};
+ const signature=window.brunetonSignature(params),dims={transmittance:[256,64],irradiance:[64,16],inscatter:[256,2048]},arrays={};let seed=0;
+ for(const [name,[w,h]] of Object.entries(dims)){
+  const a=new Float32Array(w*h*4);for(let y=0;y<h;y++)for(let x=0;x<w;x++){let i=(y*w+x)*4;a[i]=(x+1)/(w+1);a[i+1]=(y+1)/(h+1);a[i+2]=((x*7+y*13+seed*17)%101)/101;a[i+3]=((x*3+y*5+seed)%47)/47;}arrays[name]=a;seed++;
+ }
+ const sig=new TextEncoder().encode(signature),total=16+sig.length+Object.values(arrays).reduce((s,a)=>s+4+a.length*4,0),buffer=new ArrayBuffer(total),v=new DataView(buffer);
+ v.setUint32(0,window.BAKED_ATMOSPHERE_MAGIC,true);v.setUint16(4,window.BAKED_ATMOSPHERE_VERSION,true);v.setUint32(8,sig.length,true);new Uint8Array(buffer,16,sig.length).set(sig);
+ let offset=16+sig.length;for(const data of Object.values(arrays)){v.setUint32(offset,data.length,true);offset+=4;for(let i=0;i<data.length;i++)v.setFloat32(offset+i*4,data[i],true);offset+=data.length*4;}
+ // Exercise the real manifest loader with in-memory responses; no shipped file
+ // or external asset is needed, and signature lookup uses the production code.
+ const realFetch=window.fetch.bind(window);window.fetch=async(input,init)=>{
+  const url=String(input);if(url==='/fixture/manifest.json')return new Response(JSON.stringify({version:window.BAKED_ATMOSPHERE_VERSION,tables:{earth:'synthetic.bin'}}),{status:200});
+  if(url==='/fixture/synthetic.bin')return new Response(buffer,{status:200});return realFetch(input,init);
+ };
+ let preload;try{preload=await window.preloadBakedAtmosphereTables('/fixture/')}finally{window.fetch=realFetch}
+ if(preload.loaded!==1||preload.total!==1)throw Error('fixture preload failed '+JSON.stringify(preload));
+ const tables=window.takeBakedAtmosphereTables(params);if(!tables||tables.signature!==signature)throw Error('matching baked table unavailable');
+ if(window.takeBakedAtmosphereTables(params)!==null)throw Error('baked table was not consumed once');
+ if(fault==='empty')tables.transmittance=new Float32Array(0);
+ let checkedValues=0;for(const name of Object.keys(dims)){const a=arrays[name],b=tables[name];if(!(b instanceof Float32Array)||a.length!==b.length)throw Error('baked payload length '+name);for(let i=0;i<a.length;i++)if(a[i]!==b[i])throw Error('baked payload mismatch '+name+' '+i);checkedValues+=a.length;}
+ const renderer=new THREE.WebGLRenderer({antialias:false});renderer.setSize(1,1,false);
+ if(!renderer.extensions.get('EXT_color_buffer_float')||!renderer.extensions.get('OES_texture_float_linear'))throw Error('probe requires float render and linear filtering');
+ const luts=window.buildBrunetonLuts(THREE,renderer,'synthetic',params,{orders:1,sampleScale:.05,tables});if(!luts?.baked)throw Error('actual baked generator branch not taken');
+ const target=new THREE.WebGLRenderTarget(1,1,{type:THREE.FloatType,depthBuffer:false}),scene=new THREE.Scene(),camera=new THREE.OrthographicCamera(-1,1,1,-1,0,2);camera.position.z=1;camera.updateMatrixWorld();
+ const point=new THREE.Vector2(),mat=new THREE.ShaderMaterial({uniforms:{map:{value:null},point:{value:point}},vertexShader:'void main(){gl_Position=vec4(position.xy,0.,1.);}',fragmentShader:'uniform sampler2D map;uniform vec2 point;void main(){gl_FragColor=texture2D(map,point);}',depthTest:false,depthWrite:false});
+ const mesh=new THREE.Mesh(new THREE.PlaneGeometry(2,2),mat);mesh.frustumCulled=false;scene.add(mesh);
+ const points=[[0,0],[1,1],[.31,.62],[.1,.95],[.501,.498],[1,0],[.00001,.4999],[.9999,.75],[1.2,-.2],[.5,.5]];
+ function expected(a,w,h,u,v,c){const px=u*w-.5,py=v*h-.5,x=Math.floor(px),y=Math.floor(py),fx=px-x,fy=py-y,ix=k=>Math.max(0,Math.min(w-1,k)),iy=k=>Math.max(0,Math.min(h-1,k)),get=(dx,dy)=>a[(iy(y+dy)*w+ix(x+dx))*4+c];return (get(0,0)*(1-fx)+get(1,0)*fx)*(1-fy)+(get(0,1)*(1-fx)+get(1,1)*fx)*fy;}
+ let max=0,sum=0,over=0,count=0,worst=null;
+ for(const [name,[w,h]] of Object.entries(dims)){
+  const tex=luts[name];if(!tex.isDataTexture||tex.type!==THREE.FloatType||tex.image.width!==w||tex.image.height!==h||tex.flipY||tex.minFilter!==THREE.LinearFilter||tex.magFilter!==THREE.LinearFilter)throw Error('baked texture contract '+name);mat.uniforms.map.value=tex;
+  for(const [x,y] of points){point.set(x,fault==='flip'?1-y:y);renderer.setRenderTarget(target);renderer.render(scene,camera);const out=new Float32Array(4);renderer.readRenderTargetPixels(target,0,0,1,1,out);for(let c=0;c<4;c++){const ref=expected(arrays[name],w,h,x,y,c),d=Math.abs(out[c]-ref);sum+=d;count++;if(!Number.isFinite(out[c])||d>1e-5)over++;if(d>max){max=d;worst={name,x,y,channel:c,expected:ref,actual:out[c]}}}}
+ }
+ const glError=renderer.getContext().getError();for(const name of Object.keys(dims))luts[name].dispose();luts.dispose();target.dispose();mesh.geometry.dispose();mat.dispose();renderer.dispose();
+ window.probe={done:true,error:null,fault,preload,signatureBytes:sig.length,checkedValues,count,max,mean:sum/count,over,worst,glError};
+}catch(e){window.probe={done:true,error:String(e?.stack||e)}}
+</script></body></html>

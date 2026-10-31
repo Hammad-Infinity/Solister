@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"><script type="importmap">
+{
+  "imports": {
+    "three": "../../vendor/three-r186/three.module.js",
+    "three/addons/": "../../vendor/three-r186/addons/"
+  }
+}
+</script>
+
+<title>Solister - procedural terrain map bake</title>
+<style>
+  html, body { margin: 0; background: #101014; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="view" width="1024" height="512"></canvas>
+<script type="module">
+import "../../src/app/three-runtime.js";
+await new Promise((resolve, reject) => { const s=document.createElement("script"); s.src="../../src/render/terra-bake.js"; s.onload=resolve; s.onerror=reject; document.head.appendChild(s); });
+// Renders the four baked maps in a 2x2 grid so they can be inspected directly.
+const canvas = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: false, alpha: false });
+renderer.setPixelRatio(1);
+renderer.setSize(1024, 512, false);
+
+const keys = [ "mars", "venus", "mercury", "moon" ];
+const textures = [];
+const reports = [];
+for (const key of keys) {
+    const started = performance.now();
+    const texture = bakeTerraMap(renderer, key, { width: 512 });
+    reports.push({ key: key, ok: !!texture, ms: Math.round(performance.now() - started) });
+    textures.push({ key: key, texture: texture });
+}
+
+// One quad, one material, texture swapped per viewport: four meshes in one
+// scene would all draw into every viewport and the last one would win.
+const scene = new THREE.Scene();
+const camera = new THREE.Camera();
+const quadGeometry = new THREE.PlaneGeometry(2, 2);
+const material = new THREE.MeshBasicMaterial({ map: null, toneMapped: false });
+scene.add(new THREE.Mesh(quadGeometry, material));
+
+renderer.setScissorTest(true);
+renderer.autoClear = false;
+renderer.setClearColor(0x000000, 1);
+renderer.clear(true, true, true);
+for (let i = 0; i < textures.length; i++) {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const x = col * 512;
+    const y = 512 - (row + 1) * 256;
+    renderer.setViewport(x, y, 512, 256);
+    renderer.setScissor(x, y, 512, 256);
+    material.map = textures[i].texture;
+    material.needsUpdate = true;
+    renderer.render(scene, camera);
+}
+window.__terraReport = reports;
+window.__terraDone = true;
+</script>
+</body>
+</html>

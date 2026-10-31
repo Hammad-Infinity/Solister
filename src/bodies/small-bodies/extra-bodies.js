@@ -111,7 +111,7 @@ export class ExtraBodies {
         this.load();
         const T = this.THREE;
         for (const [key, p] of Object.entries(EXTRA_BODIES)) {
-            const radius = this.km2u(BodyShapes.maxRadiusKm(key, p.radiusKm)), mesh = new T.Mesh(BodyShapes.createGeometry(T, key, radius, 64, 32), (() => {
+            const radius = this.km2u(BodyShapes.maxRadiusKm(key, p.radiusKm)), mesh = new T.Mesh(BodyShapes.createGeometry(T, key, radius, 256, 128), (() => {
                 const mat = new T.MeshStandardMaterial({
                     color: p.color,
                     roughness: 1,
@@ -298,8 +298,10 @@ export class ExtraBodies {
             e.orbit = new this.THREE.LineLoop(OrbitGeometry.createAnchoredOrbitGeometry(this.THREE, OrbitGeometry.ORBIT_LINE_SEGMENTS), new this.THREE.LineBasicMaterial({
                 color: p.color,
                 transparent: true,
-                opacity: .4,
-                depthWrite: false
+                opacity: .6,
+                blending: this.THREE.AdditiveBlending,
+                depthWrite: false,
+                toneMapped: false
             }));
             e.orbit.raycast = () => {};
             e.orbit.userData.orbitModel = "instantaneous osculating ellipse";

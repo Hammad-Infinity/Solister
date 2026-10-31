@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+{
+  "imports": {
+    "three": "../../vendor/three-r186/three.module.js",
+    "three/addons/": "../../vendor/three-r186/addons/"
+  }
+}
+</script>
+<title>Aurora lab</title>
+<style>html,body{margin:0;background:#000;color:#ccc;font:12px ui-monospace,monospace}canvas{display:block}</style>
+</head>
+<body>
+<canvas id="view" width="512" height="512"></canvas>
+<script>
+globalThis.BodyShapes = {
+  axesKm: { earth:[6378.1366,6378.1366,6356.7519], mars:[3396.19,3396.19,3376.2], venus:[6051.8,6051.8,6051.8] },
+  maxRadiusKm(key, fallback) { const a = this.axesKm[key]; return a ? Math.max(...a) : fallback; },
+  createGeometry(T, key, radius, w = 96, h = 48) { return new T.SphereGeometry(radius, w, h); }
+};
+// log-depth chunk is not compiled in this lab
+globalThis.LDB_VERTEX_PARS = ""; globalThis.LDB_VERTEX_TAIL = "";
+globalThis.LDB_FRAGMENT_PARS = ""; globalThis.LDB_FRAGMENT_HEAD = "";
+</script>
+<script type="module">
+import "../../src/app/three-runtime.js";
+await new Promise((resolve, reject) => { const s=document.createElement("script"); s.src="../../src/bodies/planet-factory.js"; s.onload=resolve; s.onerror=reject; document.head.appendChild(s); });
+const canvas = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(512, 512, false);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 200);
+const planet = new THREE.Mesh(new THREE.SphereGeometry(1, 96, 64),
+  new THREE.MeshBasicMaterial({ color: 0x101820 }));
+scene.add(planet);
+const sun = new THREE.Vector3(50, 0, 0);
+
+window.__aurora = {
+  make(key) {
+    for (const o of [...planet.children]) { planet.remove(o); o.geometry?.dispose?.(); o.material?.dispose?.(); }
+    const a = createPlanetAurora(key, planet);
+    this.mesh = a;
+    return !!a;
+  },
+  render({ distance = 4, azimuth = 0, elevation = 0.2, sunAzimuth = Math.PI, sunElevation = 0, intensity = 1, time = 0 }) {
+    camera.position.set(
+      Math.cos(elevation) * Math.sin(azimuth) * distance,
+      Math.sin(elevation) * distance,
+      Math.cos(elevation) * Math.cos(azimuth) * distance);
+    camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld(true);
+    sun.set(Math.cos(sunElevation) * Math.sin(sunAzimuth), Math.sin(sunElevation),
+            Math.cos(sunElevation) * Math.cos(sunAzimuth)).multiplyScalar(50);
+    if (this.mesh) {
+      const u = this.mesh.material.uniforms;
+      u.uIntensity.value = intensity * (this.mesh.userData.auroraGain ?? 1);
+      u.uSunWorldPos.value.copy(sun);
+      u.uTime.value = time;
+    }
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(scene, camera);
+  }
+};
+window.__ready = true;
+</script>
+</body>
+</html>

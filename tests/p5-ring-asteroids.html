@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e19 — ring asteroid surface points GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e19 ring-asteroids starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { RingAsteroids } from "../src/bodies/rings/ring-asteroids.js";
+import {
+  createRingAsteroidMarkers,
+  createRingAsteroidQuadGeometry,
+  deriveRingAsteroidMaterial
+} from "../src/bodies/rings/ring-asteroids.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { uniform } from "three/tsl";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshStandardNodeMaterial,
+  MeshBasicNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  DirectionalLight as NodeDirectionalLight,
+  AmbientLight as NodeAmbientLight,
+  DoubleSide as NodeDoubleSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// The ring-surface point patch (matchingRingMaterial) against
+// the TSL factory. Both pages build production's real
+// RingAsteroids system over a stub saturn + ring (seeded, so
+// the marker arrays are identical on both pages) and drive
+// its real update(); rebuild()'s material-state and initial
+// uniform decisions are checked bit-exact against
+// deriveRingAsteroidMaterial in page. The classic side renders
+// production's patched clone material + THREE.Points exactly
+// as built; the node side renders createRingAsteroidMarkers
+// slots on a MeshStandardNodeMaterial over
+// createRingAsteroidQuadGeometry built from the same
+// production arrays, with the live uniform values. The ring
+// mesh itself is hidden on both sides (the markers are the
+// subject); lights/material parameters mirror production's
+// saturn ring material.
+// Cases:
+//   0 overview face-on: min-size points, coverage floor path
+//   1 tilted grazing: anisotropic textureGrad footprints
+//   2 close-up giants: physical sizes, shape interiors, occluder
+//   3 population feather + fade 0.55 + ring spin + 40 days
+//   4 below the plane + alphaMap/roughnessMap matched channels
+const NEAR = 0.1;
+const FAR = 5000;
+const FOV = 40;
+const PLANET_R = 10;
+const RING_INNER = 11.1;
+const RING_OUTER = 23.3;
+const RING_AXES_KM = [60268, 60268, 54364];
+const CASES = [
+  { kind: "overview-face-on", tiltX: 0, camera: [0, 0, 58], lookAt: [0, 0, 0], sun: [40, 30, 25], days: 3, countScale: 0.0125 },
+  { kind: "tilted-grazing-gradients", tiltX: -1.15, camera: [0, 14, 52], lookAt: [0, 0, 0], sun: [40, 30, 25], days: 3, countScale: 0.0125 },
+  { kind: "closeup-giant-shapes", tiltX: -0.4, camera: [17.5, 2.5, 7], lookAt: [14, 0, 0], sun: [18, 12, 40], days: 3, countScale: 0.02, unitsPerMeter: 0.04, occluder: [14.6, 0.4, 1.8] },
+  { kind: "feather-fade-spin", tiltX: -0.9, camera: [0, 16, 50], lookAt: [0, 0, 0], sun: [40, 30, 25], days: 40, countScale: 0.0125, spinZ: 0.7, fade: 0.55, population: [0.45, 0.08] },
+  { kind: "below-plane-channels", tiltX: -0.8, camera: [6, -10, -52], lookAt: [0, 0, 0], sun: [20, 25, 40], days: 12, countScale: 0.0125, channels: true }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5ring = { done: false, error: null };
+
+function makeRingTexture(T, withTransform) {
+  const w = 256, h = 64;
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const v = y / (h - 1);
+      let a = 30 + Math.round(200 * v);
+      if (v > 0.689 && v < 0.752) a = 10;                    // Cassini-like gap
+      if (v > 0.906 && v < 0.911) a = 40;                    // Encke-like notch
+      let r = 175 + Math.round(55 * Math.sin(v * 47.0));
+      let g = 158 + Math.round(45 * Math.sin(v * 31.0 + 1.3));
+      let b = 128 + Math.round(34 * Math.cos(v * 23.0));
+      if ((x % 32) < 16) { r = Math.round(r * 0.8); g = Math.round(g * 0.8); b = Math.round(b * 0.8); a = Math.round(a * 0.55); }
+      if (x > 200) a = Math.min(255, a + 50);
+      if (x >= 180 && x < 220 && y >= 8 && y < 20) { r = 255; g = 30; b = 30; a = 240; }
+      if (x >= 20 && x < 60 && y >= 44 && y < 56) { r = 30; g = 60; b = 255; a = 240; }
+      const p = (y * w + x) * 4;
+      data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = a;
+    }
+  }
+  const tex = new T.DataTexture(data, w, h, T.RGBAFormat);
+  tex.wrapS = T.RepeatWrapping;
+  tex.wrapT = T.ClampToEdgeWrapping;
+  tex.minFilter = T.LinearMipmapLinearFilter;
+  tex.magFilter = T.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.colorSpace = T.SRGBColorSpace;
+  if (withTransform) { tex.repeat.set(3, 1); tex.offset.set(0.07, 0); }
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeChannelTexture(T, kind, withTransform) {
+  const w = 128, h = 32;
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const u = x / (w - 1), v = y / (h - 1);
+      const g = kind === "alpha"
+        ? Math.round(255 * (0.25 + 0.75 * Math.abs(Math.sin(u * 9.0 + v * 4.0))))
+        : Math.round(255 * (0.2 + 0.8 * v));
+      const p = (y * w + x) * 4;
+      data[p] = g; data[p + 1] = g; data[p + 2] = g; data[p + 3] = 255;
+    }
+  }
+  const tex = new T.DataTexture(data, w, h, T.RGBAFormat);
+  tex.wrapS = T.RepeatWrapping;
+  tex.wrapT = T.RepeatWrapping;
+  tex.minFilter = T.LinearMipmapLinearFilter;
+  tex.magFilter = T.LinearFilter;
+  tex.generateMipmaps = true;
+  if (withTransform && kind === "alpha") { tex.repeat.set(5, 2); tex.offset.set(0.11, 0.03); }
+  if (withTransform && kind === "rough") { tex.repeat.set(2, 1); tex.offset.set(0.21, 0); }
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeClassicCamera() {
+  const camera = new THREE.PerspectiveCamera(FOV, 1, NEAR, FAR);
+  camera.position.set(...cfg.camera);
+  camera.lookAt(...cfg.lookAt);
+  camera.updateProjectionMatrix();
+  camera.updateWorldMatrix(true, false);
+  return camera;
+}
+
+// Production system, classic namespace, identical on both
+// pages: stub saturn + ring, the real RingAsteroids.
+function buildSystem() {
+  const ringTexture = makeRingTexture(THREE, true);
+  const ringMaterial = new THREE.MeshStandardMaterial({
+    map: ringTexture,
+    color: new THREE.Color(12170150),
+    emissive: new THREE.Color(5591369),
+    emissiveMap: ringTexture,
+    emissiveIntensity: 0.25,
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: true,
+    alphaTest: 0.1,
+    opacity: 1,
+    roughness: 0.9,
+    metalness: 0
+  });
+  let alphaTexture = null, roughTexture = null;
+  if (cfg.channels) {
+    alphaTexture = makeChannelTexture(THREE, "alpha", true);
+    roughTexture = makeChannelTexture(THREE, "rough", true);
+    ringMaterial.alphaMap = alphaTexture;
+    ringMaterial.roughnessMap = roughTexture;
+  }
+  const planetGeo = new THREE.SphereGeometry(PLANET_R, 32, 16);
+  planetGeo.userData.referenceAxesKm = RING_AXES_KM;
+  const planet = new THREE.Mesh(planetGeo, new THREE.MeshBasicMaterial());
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(RING_INNER, RING_OUTER, 96, 1), ringMaterial);
+  ring.rotation.x = cfg.tiltX;
+  ring.updateWorldMatrix(true, false);
+  const scene = new THREE.Scene();
+  scene.add(ring);
+  const camera = makeClassicCamera();
+  const asteroids = new RingAsteroids({
+    THREE,
+    camera,
+    renderer: { domElement: { width: size, height: size } },
+    objectRegistry: { saturn: planet, "saturn-ring": ring },
+    km2u: 1,
+    countScale: cfg.countScale,
+    getQuality: () => "high"
+  });
+  asteroids.rebuild();
+  if (asteroids.layers.length !== 1) throw new Error("expected one asteroid layer");
+  const layer = asteroids.layers[0];
+  const snapshot = {
+    uniforms: JSON.parse(JSON.stringify({
+      uDays: layer.uniforms.uDays.value,
+      uSpin: layer.uniforms.uSpin.value,
+      uFade: layer.uniforms.uFade.value,
+      uPopulation: layer.uniforms.uPopulation.value,
+      uPopulationFeather: layer.uniforms.uPopulationFeather.value,
+      uViewHeight: layer.uniforms.uViewHeight.value,
+      uViewWidth: layer.uniforms.uViewWidth.value,
+      uUnitsPerMeter: layer.uniforms.uUnitsPerMeter.value,
+      uRingBounds: layer.uniforms.uRingBounds.value.toArray()
+    })),
+    drawCount: layer.points.geometry.drawRange.count,
+    count: layer.count
+  };
+  return { asteroids, layer, ring, planet, scene, camera, ringTexture, alphaTexture, roughTexture, snapshot };
+}
+
+// Derivation bit-exactness, in page: rebuild()'s material
+// and initial uniforms vs deriveRingAsteroidMaterial.
+function checkDerivation(sys) {
+  const { layer, snapshot } = sys;
+  const material = layer.points.material;
+  const derived = deriveRingAsteroidMaterial({
+    quality: "high",
+    countScale: cfg.countScale,
+    count: snapshot.count,
+    unitsPerMeter: snapshot.uniforms.uUnitsPerMeter,
+    ringBounds: snapshot.uniforms.uRingBounds
+  });
+  const expectedUpm = PLANET_R / (Math.max(...RING_AXES_KM) * 1e3);
+  const pos = sys.ring.geometry.attributes.position;
+  let lo = Infinity, hi = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const d = Math.hypot(pos.getX(i), pos.getY(i));
+    lo = Math.min(lo, d); hi = Math.max(hi, d);
+  }
+  const ok =
+    material.alphaTest === derived.alphaTest &&
+    material.transparent === derived.transparent &&
+    material.depthWrite === derived.depthWrite &&
+    material.depthTest === derived.depthTest &&
+    material.forceSinglePass === derived.forceSinglePass &&
+    material.extensions.shaderTextureLOD === derived.shaderTextureLOD &&
+    material.customProgramCacheKey().endsWith(derived.cacheKeySuffix) &&
+    snapshot.uniforms.uDays === derived.uniforms.days &&
+    snapshot.uniforms.uSpin === derived.uniforms.spin &&
+    snapshot.uniforms.uFade === derived.uniforms.fade &&
+    snapshot.uniforms.uPopulation === derived.population &&
+    snapshot.uniforms.uPopulationFeather === derived.populationFeather &&
+    snapshot.uniforms.uViewHeight === derived.uniforms.viewHeight &&
+    snapshot.uniforms.uViewWidth === derived.uniforms.viewWidth &&
+    snapshot.uniforms.uUnitsPerMeter === expectedUpm &&
+    snapshot.uniforms.uRingBounds[0] === lo &&
+    snapshot.uniforms.uRingBounds[1] === hi &&
+    snapshot.drawCount === derived.drawCount;
+  if (!ok) throw new Error("derivation mismatch: " + JSON.stringify({
+    derived, snapshot,
+    material: {
+      alphaTest: material.alphaTest, transparent: material.transparent,
+      depthWrite: material.depthWrite, depthTest: material.depthTest,
+      forceSinglePass: material.forceSinglePass,
+      key: material.customProgramCacheKey()
+    }, expectedUpm, lo, hi
+  }));
+}
+
+// Real update() drive: dayBase at 0, optional mid-drive ring
+// spin (the spinRef path), then the case day. Case overrides
+// write the same uniform slots update() would.
+function driveUpdates(sys) {
+  const { asteroids, layer, ring } = sys;
+  asteroids.update({ days: 0, delta: 0.25 });
+  if (cfg.spinZ) {
+    ring.rotateZ(cfg.spinZ);
+    ring.updateWorldMatrix(true, false);
+  }
+  asteroids.update({ days: cfg.days, delta: 0.25 });
+  layer.fade = 1;
+  layer.points.visible = true;
+  if (cfg.fade !== undefined) layer.uniforms.uFade.value = cfg.fade;
+  else layer.uniforms.uFade.value = 1;
+  if (cfg.population) {
+    layer.uniforms.uPopulation.value = cfg.population[0];
+    layer.uniforms.uPopulationFeather.value = cfg.population[1];
+    const n = Math.min(layer.count,
+      Math.ceil(layer.count * (cfg.population[0] + cfg.population[1])));
+    layer.points.geometry.setDrawRange(0, n);
+  }
+  if (cfg.unitsPerMeter) layer.uniforms.uUnitsPerMeter.value = cfg.unitsPerMeter;
+}
+
+function buildGlslScene(sys) {
+  const scene = sys.scene;
+  sys.ring.material.visible = false;
+  const sun = new THREE.DirectionalLight(0xffffff, 9);
+  sun.position.set(...cfg.sun);
+  scene.add(sun); scene.add(sun.target);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+  if (cfg.occluder) {
+    const occ = new THREE.Mesh(
+      new THREE.SphereGeometry(0.55, 32, 16),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(0.04, 0.04, 0.045) }));
+    occ.position.set(...cfg.occluder);
+    occ.updateWorldMatrix(true, false);
+    scene.add(occ);
+  }
+  return { scene, camera: sys.camera };
+}
+
+function buildTslScene(sys) {
+  const scene = new NodeScene();
+  const camera = new NodePerspectiveCamera(FOV, 1, NEAR, FAR);
+  camera.position.set(...cfg.camera);
+  camera.lookAt(...cfg.lookAt);
+  camera.updateProjectionMatrix();
+  scene.add(camera);
+  const sun = new NodeDirectionalLight(0xffffff, 9);
+  sun.position.set(...cfg.sun);
+  scene.add(sun); scene.add(sun.target);
+  scene.add(new NodeAmbientLight(0xffffff, 0.35));
+
+  const src = sys.layer;
+  const geo = src.points.geometry;
+  const geometry = createRingAsteroidQuadGeometry(NodeNS, {
+    orbits: geo.getAttribute("aOrbit").array,
+    properties: geo.getAttribute("aMisc").array,
+    styles: geo.getAttribute("aStyle").array,
+    outer: src.outer,
+    maximumHeight: geo.boundingBox.max.z
+  });
+  geometry.instanceCount = geo.drawRange.count;
+
+  sys.ringTexture.updateMatrix();
+  const mapMatrix = new NodeNS.Matrix3().fromArray(sys.ringTexture.matrix.elements);
+  const u = src.uniforms;
+  const options = {
+    days: uniform(u.uDays.value),
+    spin: uniform(u.uSpin.value),
+    fade: uniform(u.uFade.value),
+    population: uniform(u.uPopulation.value),
+    populationFeather: uniform(u.uPopulationFeather.value),
+    viewWidth: uniform(u.uViewWidth.value),
+    viewHeight: uniform(u.uViewHeight.value),
+    unitsPerMeter: u.uUnitsPerMeter.value,
+    ringBounds: u.uRingBounds.value.toArray(),
+    color: new NodeColor(12170150),
+    opacity: 1,
+    emissive: new NodeColor(5591369),
+    emissiveIntensity: 0.25,
+    roughness: 0.9,
+    metalness: 0,
+    map: makeRingTexture(NodeNS, false),
+    mapTransform: mapMatrix,
+    emissiveMap: makeRingTexture(NodeNS, false),
+    emissiveMapTransform: mapMatrix
+  };
+  if (cfg.channels) {
+    sys.alphaTexture.updateMatrix();
+    sys.roughTexture.updateMatrix();
+    options.alphaMap = makeChannelTexture(NodeNS, "alpha", false);
+    options.alphaMapTransform = new NodeNS.Matrix3().fromArray(sys.alphaTexture.matrix.elements);
+    options.roughnessMap = makeChannelTexture(NodeNS, "rough", false);
+    options.roughnessMapTransform = new NodeNS.Matrix3().fromArray(sys.roughTexture.matrix.elements);
+  }
+  const slots = createRingAsteroidMarkers(options);
+  const material = new MeshStandardNodeMaterial({ name: "P5e19 ring-asteroids TSL" });
+  material.transparent = true;
+  material.depthWrite = false;
+  material.depthTest = true;
+  material.forceSinglePass = true;
+  material.side = NodeDoubleSide;
+  material.alphaTest = 0.001;
+  material.roughness = 0.9;
+  material.metalness = 0;
+  material.positionNode = slots.positionNode;
+  material.vertexNode = slots.vertexNode;
+  material.colorNode = slots.colorNode;
+  material.opacityNode = slots.opacityNode;
+  if (slots.emissiveNode) material.emissiveNode = slots.emissiveNode;
+  if (slots.roughnessNode) material.roughnessNode = slots.roughnessNode;
+  if (slots.metalnessNode) material.metalnessNode = slots.metalnessNode;
+  material.outputNode = slots.outputNode;
+
+  const mesh = new NodeMesh(geometry, material);
+  mesh.position.copy(sys.ring.position);
+  mesh.quaternion.copy(sys.ring.quaternion);
+  mesh.scale.copy(sys.ring.scale);
+  mesh.renderOrder = src.points.renderOrder;
+  mesh.frustumCulled = false;
+  mesh.updateWorldMatrix(true, false);
+  scene.add(mesh);
+
+  if (cfg.occluder) {
+    const occMat = new MeshBasicNodeMaterial();
+    occMat.color.setRGB(0.04, 0.04, 0.045);
+    const occ = new NodeMesh(new NodeSphereGeometry(0.55, 32, 16), occMat);
+    occ.position.set(...cfg.occluder);
+    occ.updateWorldMatrix(true, false);
+    scene.add(occ);
+  }
+  return { scene, camera };
+}
+
+try {
+  const sys = buildSystem();
+  checkDerivation(sys);
+  driveUpdates(sys);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(sys) : buildTslScene(sys);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5ring = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e19 ring-asteroids ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5ring = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e19 ring-asteroids error: " + window.__p5ring.error;
+}
+</script>
+</body>
+</html>

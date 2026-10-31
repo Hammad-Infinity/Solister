@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c7 — Earth cloud volume lighting GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c7 Earth cloud volume lighting starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createEarthCloudVolumeLighting } from "../src/ui/planet-detail.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { positionGeometry, uv, vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+// Cases: outside day side (frost scatter only); below-shell Camera
+// (underside fill active, terminator sun); outside backlit (back-scatter
+// dominant, sun fill off); below-shell night side on an exaggerated
+// shell with a repeated map. diffuseColor.a is a varying test alpha, as
+// the post-effect reads the post-march alpha.
+const CASES = [
+  { camera: [0.25, 0.1, 1.6], sun: [0.3, 0.2, 1.0], cloudRatio: 1.001884, sx: 1, sy: 1, tx: 0, ty: 0 },
+  { camera: [0.3, 0.12, 0.94], sun: [0.8, 0.25, 0.4], cloudRatio: 1.001884, sx: 1, sy: 1, tx: 0, ty: 0 },
+  { camera: [0.0, 0.0, 1.5], sun: [0.05, 0.0, -1.0], cloudRatio: 1.001884, sx: 1, sy: 1, tx: 0, ty: 0 },
+  { camera: [0.1, -0.05, 0.9], sun: [-0.3, 0.1, -1.0], cloudRatio: 1.02, sx: 2, sy: 2, tx: 0.07, ty: 0.03 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+const cameraInside = Math.hypot(...cfg.camera) < cfg.cloudRatio;
+const TEX_W = 1024, TEX_H = 512;
+
+window.__p5lighting = { done: false, error: null };
+
+async function loadProductionParts() {
+  const text = await fetch("../src/ui/planet-detail.js").then(r => {
+    if (!r.ok) throw new Error("planet-detail.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalAfter = at => {
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found");
+    return Function("return " + text.slice(tick, end + 1))();
+  };
+  const shaderUV = literalAfter(text.indexOf("const shaderUV = "));
+  const cloudSampling = literalAfter(text.indexOf("const cloudSampling = "));
+  const hookAt = text.indexOf('hook(cloud.material, "cloud-volume"');
+  if (hookAt < 0) throw new Error("cloud-volume hook not found");
+  const tokenAt = text.indexOf("#include <lights_fragment_end>", hookAt);
+  const effect = literalAfter(tokenAt);
+  if (!effect.includes("reflectedLight.indirectDiffuse+=")) throw new Error("extracted effect is not the volume lighting");
+  return { shaderUV, cloudSampling, effect };
+}
+
+function makeCapGeometry(GeometryClass) {
+  const geometry = new GeometryClass(2, 2, 160, 160);
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i) * 1.15;
+    const y = pos.getY(i) * 1.15;
+    const len = Math.hypot(x, y, 0.75);
+    pos.setXYZ(i, x / len, y / len, 0.75 / len);
+  }
+  pos.needsUpdate = true;
+  return geometry;
+}
+
+function makeTestTexture() {
+  const data = new Uint8Array(TEX_W * TEX_H * 4);
+  for (let y = 0; y < TEX_H; y++) {
+    const v = y / TEX_H;
+    for (let x = 0; x < TEX_W; x++) {
+      const u = x / TEX_W;
+      const i = (y * TEX_W + x) * 4;
+      data[i] = Math.round(255 * (0.5 + 0.5 * Math.sin(6.28318530718 * (3 * u + 2 * v))));
+      data[i + 1] = Math.round(255 * (0.5 + 0.5 * Math.sin(6.28318530718 * (5 * u - 3 * v) + 1.7)));
+      data[i + 2] = Math.round(255 * (0.5 + 0.5 * Math.cos(6.28318530718 * (2 * u + 4 * v) + 0.6)));
+      data[i + 3] = 255;
+    }
+  }
+  const mipmaps = [{ data, width: TEX_W, height: TEX_H }];
+  let w = TEX_W, h = TEX_H, src = data;
+  while (w > 1 || h > 1) {
+    const nw = Math.max(1, w >> 1), nh = Math.max(1, h >> 1);
+    const out = new Uint8Array(nw * nh * 4);
+    for (let y = 0; y < nh; y++) {
+      for (let x = 0; x < nw; x++) {
+        let r = 0, g = 0, b = 0, a = 0, n = 0;
+        for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+          const sx = Math.min(w - 1, x * 2 + dx), sy = Math.min(h - 1, y * 2 + dy);
+          const si = (sy * w + sx) * 4;
+          r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3]; n++;
+        }
+        const oi = (y * nw + x) * 4;
+        out[oi] = Math.round(r / n); out[oi + 1] = Math.round(g / n);
+        out[oi + 2] = Math.round(b / n); out[oi + 3] = Math.round(a / n);
+      }
+    }
+    mipmaps.push({ data: out, width: nw, height: nh });
+    src = out; w = nw; h = nh;
+  }
+  const tex = new THREE.DataTexture(data, TEX_W, TEX_H, THREE.RGBAFormat);
+  tex.mipmaps = mipmaps;
+  tex.generateMipmaps = false;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function mapTransform() {
+  return new THREE.Matrix3().set(cfg.sx, 0, cfg.tx, 0, cfg.sy, cfg.ty, 0, 0, 1);
+}
+
+function makeGlslMaterial(parts, tex) {
+  return new THREE.ShaderMaterial({
+    name: "P5c7 Earth cloud-volume lighting GLSL reference",
+    uniforms: {
+      dCloudMap: { value: tex },
+      dMapTransform: { value: mapTransform() },
+      dLocalCamera: { value: new THREE.Vector3(...cfg.camera) },
+      dSun: { value: new THREE.Vector3(...cfg.sun) },
+      dCloudRatio: { value: cfg.cloudRatio }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vDetailLocal;
+      void main() {
+        vUv = uv;
+        vDetailLocal = position;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vUv;
+      varying vec3 vDetailLocal;
+      uniform sampler2D dCloudMap;
+      uniform mat3 dMapTransform;
+      uniform vec3 dLocalCamera;
+      uniform vec3 dSun;
+      uniform float dCloudRatio;
+      ${parts.shaderUV}
+      ${parts.cloudSampling}
+      struct ReflectedLight { vec3 indirectDiffuse; };
+      void main() {
+        vec4 diffuseColor = vec4(0.8, 0.85, 0.9, 0.35 + 0.6 * vUv.y);
+        ReflectedLight reflectedLight;
+        reflectedLight.indirectDiffuse = vec3(0.02 + 0.25 * vUv.x, 0.03 + 0.18 * vUv.y, 0.05);
+        {
+        ${parts.effect}
+        }
+        gl_FragColor = vec4(reflectedLight.indirectDiffuse * 1.4, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial(tex) {
+  const material = new MeshBasicNodeMaterial({ name: "P5c7 Earth cloud-volume lighting TSL" });
+  const lighting = createEarthCloudVolumeLighting({
+    cloudMap: tex,
+    mapTransform: mapTransform(),
+    localCamera: cfg.camera,
+    sun: cfg.sun,
+    cloudRatio: cfg.cloudRatio
+  });
+  const pUv = uv();
+  const alpha = float(0.35).add(pUv.y.mul(0.6));
+  const indirect = vec3(
+      float(0.02).add(pUv.x.mul(0.25)),
+      float(0.03).add(pUv.y.mul(0.18)),
+      float(0.05))
+    .add(lighting.cloudVolumeIndirect(positionGeometry, alpha));
+  material.colorNode = vec4(indirect.mul(1.4), float(1.0));
+  return material;
+}
+
+try {
+  const parts = impl === "glsl" ? await loadProductionParts() : null;
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  const tex = makeTestTexture();
+  let scene, camera, mesh, material;
+  const viewExtent = 0.55;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeGlslMaterial(parts, tex);
+    mesh = new THREE.Mesh(makeCapGeometry(THREE.PlaneGeometry), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-viewExtent, viewExtent, viewExtent, -viewExtent, 0, 10);
+    camera.position.z = 3;
+    material = makeTslMaterial(tex);
+    mesh = new NodeMesh(makeCapGeometry(NodePlaneGeometry), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5lighting = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    cloudRatio: cfg.cloudRatio,
+    cameraInside,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c7 Earth cloud volume lighting ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5lighting = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c7 Earth cloud volume lighting error: " + window.__p5lighting.error;
+}
+</script>
+</body>
+</html>

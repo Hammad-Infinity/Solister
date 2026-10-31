@@ -137,6 +137,18 @@ export class CometLayer {
         }
         if (this.tables) this.buildRender(); else this.load();
     }
+    // Largest sim-seconds per real second that keeps the focused comet from
+    // crossing more than a small fraction of the viewing distance each frame.
+    stepPerSecond(mesh, camera, target) {
+        if (!mesh || !camera) return 0;
+        const entry = [ ...this.entries.values() ].find(e => e.mesh === mesh);
+        if (!entry) return 0;
+        const v = entry.state;
+        const speed = Math.hypot(v[3], v[4], v[5]) * this.au;   // units per day
+        const view = Math.max(camera.position.distanceTo(target), 1e-12);
+        if (!(speed > 0)) return 0;
+        return .02 * view * 86400 / speed;
+    }
     mapPosition(p, out) {
         return out.set(p[0] * this.au, p[2] * this.au, -p[1] * this.au);
     }
@@ -186,9 +198,6 @@ export class CometLayer {
         material.color.setRGB(.04, .04, .04);
         material.transparent = false;
         material.depthWrite = true;
-        // A cometary nucleus is one of the darkest surfaces known, so the
-        // physical BRDF lands on near-Lambertian here. Applied before the
-        // stencil config so that can still adjust the material.
         applySurfaceBrdf(material, "comet", T);
         configureNucleusStencil(T, material);
         return new T.Mesh(g, material);
@@ -517,11 +526,14 @@ export class CometLayer {
         if (!e.path.visible) return;
         e.path.material.opacity = highlighted ? .78 : .26;
         if (style !== "trails") {
-            if (e.path.userData.osculating && e.pathBodyJD === jd) return;
+            // The ellipse is drawn relative to the nucleus, so it travels with it.
+            // Refitting only every .05 d made the curve jump at those instants, which
+            // read as a twitch; refit every frame so the line is one smooth function
+            // of the epoch.
+            e.path.position.copy(e.mesh.position);
             const orbit = osculatingEllipse(e.state, e.orbitElements || (e.orbitElements = {}));
             if (orbit) {
                 const attr = e.path.geometry.attributes.position;
-                e.path.position.copy(e.mesh.position);
                 for (let i = 0; i <= 768; i++) {
                     if (i === 0 || i === 768) this.scratch.set(e.state); else sampleEllipse(orbit, i / 768, this.scratch);
                     this.mapPosition(this.scratch, this.mapScratch).sub(e.path.position);
@@ -530,7 +542,6 @@ export class CometLayer {
                 attr.needsUpdate = true;
                 e.path.geometry.setDrawRange(0, 769);
                 e.path.userData.osculating = true;
-                e.pathBodyJD = jd;
                 e.pathEpoch = NaN;
                 return;
             }
@@ -564,12 +575,9 @@ export class CometLayer {
             e.path.geometry.setDrawRange(0, times.length);
             attr.needsUpdate = true;
         }
-        if (rebuild || e.pathBodyJD !== jd) {
-            this.mapScratch.copy(e.mesh.position).sub(e.path.position);
-            attr.setXYZ(e.pathBodyIndex, this.mapScratch.x, this.mapScratch.y, this.mapScratch.z);
-            attr.needsUpdate = true;
-            e.pathBodyJD = jd;
-        }
+        // The whole line rides with the nucleus each frame instead of dragging a
+        // single vertex towards it, which used to kink the path between rebuilds.
+        e.path.position.copy(e.mesh.position);
     }
     setHighlighted(key) {
         this.highlighted = key;

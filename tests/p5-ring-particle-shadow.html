@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c19 — ring particle shadow GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 296px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="384" height="288"></canvas>
+<div id="status">P5c19 ring particle shadow starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  createRingParticleShadow,
+  deriveRingParticleShadowInstall
+} from "../src/shaders/ring-particle-shadow.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const W = 384, H = 288;
+const canvas = document.getElementById("c");
+// Frame cases: particles on the ring plane (XZ, 7x7) around a
+// unit-radius planet at the origin, under three suns -- a large
+// close sun (broad penumbra, contained umbra), a small distant
+// sun (thin penumbra), and a near-in-plane sun (penumbra
+// stretched across the frame). Visibility renders as grey
+// (0.08 + 0.82 * v) so total umbra stays distinct from the
+// black background.
+const CASES = [
+  { sun: [5.5, 2.0, 2.5], sunRadius: 1.6 },
+  { sun: [-6.0, 1.5, -3.0], sunRadius: 0.45 },
+  { sun: [7.0, 0.35, 0.5], sunRadius: 1.1 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+const CAM = [0.4, 2.6, 4.6];
+
+window.__p5ringpart = { done: false, error: null };
+window.THREE = THREE;
+// The shared global eclipse uniforms the classic installer binds
+// by reference (state.js owns the real objects).
+window.eclipseUniforms = {
+  uEclipseSun: { value: new THREE.Vector3(9, 8, 7) },
+  uEclipseSunRadius: { value: 6.5 }
+};
+
+async function loadProduction() {
+  // ECLIPSE_GLSL lives in state.js; extract its literal so the
+  // GLSL reference cannot drift from production.
+  const text = await fetch("../src/app/state.js").then(r => {
+    if (!r.ok) throw new Error("state.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const at = text.indexOf("const ECLIPSE_GLSL = ");
+  const tick = text.indexOf(tickChar, at);
+  const end = text.indexOf(tickChar, tick + 1);
+  if (at < 0 || tick < 0 || end < 0) throw new Error("ECLIPSE_GLSL literal bounds not found");
+  const eclipseGlsl = Function("return " + text.slice(tick, end + 1))();
+  if (!eclipseGlsl.includes("float solarVisibility(vec3 p)")) {
+    throw new Error("extracted literal is not the Eclipse helper");
+  }
+  window.ECLIPSE_GLSL = eclipseGlsl;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "../src/shaders/ring-particle-shadow.glsl.js";
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  if (typeof window.installRingParticleShadow !== "function") {
+    throw new Error("production ring particle shadow installer did not load");
+  }
+  return { eclipseGlsl };
+}
+
+// The installer-derivation half: real production installer on a
+// stub material + planet, its onBeforeCompile then executed on a
+// minimal shader so the applied-to output of each mode is
+// captured from production's own string surgery.
+function productionCase(spec) {
+  window.ringShadowBindings = [];
+  const material = { needsUpdate: false };
+  const planet = {
+    geometry: { parameters: { radius: spec.radius } },
+    getWorldPosition(v) { v.set(...spec.pos); return v; }
+  };
+  if (spec.omitMode) {
+    window.installRingParticleShadow(material, planet);
+  } else {
+    window.installRingParticleShadow(material, planet, spec.isMarker);
+  }
+  const uniforms = window.ringShadowBindings[0]?.uniforms;
+  const shader = {
+    uniforms: {},
+    vertexShader: "#include <project_vertex>",
+    fragmentShader: "#include <lights_fragment_end>\n#include <opaque_fragment>"
+  };
+  material.onBeforeCompile(shader);
+  return {
+    shape: {
+      moonRadius: uniforms.uEclipseMoonRadius.value,
+      moonInit: uniforms.uEclipseMoon.value.toArray(),
+      cacheKey: material.customProgramCacheKey(),
+      appliesDirect: shader.fragmentShader.includes("reflectedLight.directDiffuse *="),
+      appliesOutgoing: shader.fragmentShader.includes("outgoingLight *=")
+    },
+    vertexWired: shader.vertexShader.includes("vRingParticleWorld") &&
+      shader.fragmentShader.includes("solarVisibility(vRingParticleWorld)"),
+    sunShared: uniforms.uEclipseSun === window.eclipseUniforms.uEclipseSun,
+    sunRadiusShared: uniforms.uEclipseSunRadius === window.eclipseUniforms.uEclipseSunRadius
+  };
+}
+
+function derivationCases() {
+  const specs = [
+    { name: "mesh-mode", radius: 1.0, pos: [1.5, -2, 3.25], isMarker: false },
+    { name: "marker-mode", radius: 0.42, pos: [-4, 0.5, 2], isMarker: true },
+    { name: "mode-omitted", radius: 2.75, pos: [0, 0, 0], omitMode: true }
+  ];
+  return specs.map((spec) => {
+    const production = productionCase(spec);
+    const der = deriveRingParticleShadowInstall({
+      planetRadius: spec.radius,
+      planetPosition: spec.pos,
+      isMarker: spec.omitMode ? undefined : spec.isMarker
+    });
+    const tsl = {
+      moonRadius: der.planetRadius,
+      moonInit: der.planetPosition,
+      cacheKey: der.cacheKey,
+      appliesDirect: der.application === "direct",
+      appliesOutgoing: der.application === "outgoing"
+    };
+    return {
+      name: spec.name,
+      production: production.shape,
+      tsl,
+      vertexWired: production.vertexWired,
+      sunShared: production.sunShared,
+      sunRadiusShared: production.sunRadiusShared
+    };
+  });
+}
+
+function makeGlslMaterial(parts) {
+  return new THREE.ShaderMaterial({
+    name: "P5c19 ring particle shadow GLSL reference",
+    uniforms: {
+      uEclipseMoon: { value: new THREE.Vector3(0, 0, 0) },
+      uEclipseSun: { value: new THREE.Vector3(...cfg.sun) },
+      uEclipseMoonRadius: { value: 1.0 },
+      uEclipseSunRadius: { value: cfg.sunRadius }
+    },
+    vertexShader: `
+      varying vec3 vRingParticleWorld;
+      void main() {
+        vRingParticleWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec3 vRingParticleWorld;
+      ${parts.eclipseGlsl}
+      void main() {
+        float v = solarVisibility(vRingParticleWorld);
+        gl_FragColor = vec4(vec3(0.08 + 0.82 * v), 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P5c19 ring particle shadow TSL" });
+  const { visibility } = createRingParticleShadow({
+    planetCenter: [0, 0, 0],
+    sun: cfg.sun,
+    planetRadius: 1.0,
+    sunRadius: cfg.sunRadius
+  });
+  const grey = float(0.08).add(visibility.mul(0.82));
+  material.colorNode = vec4(vec3(grey), float(1.0));
+  return material;
+}
+
+try {
+  const parts = await loadProduction();
+  const derivation = derivationCases();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 100);
+    material = makeGlslMaterial(parts);
+    const geo = new THREE.PlaneGeometry(7, 7);
+    geo.rotateX(-Math.PI / 2);
+    mesh = new THREE.Mesh(geo, material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(40, W / H, 0.01, 100);
+    material = makeTslMaterial();
+    const geo = new NodePlaneGeometry(7, 7);
+    geo.rotateX(-Math.PI / 2);
+    mesh = new NodeMesh(geo, material);
+  }
+  camera.position.set(...CAM);
+  camera.lookAt(0, 0, 0);
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5ringpart = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    width: W,
+    height: H,
+    caseShape: { sun: cfg.sun, sunRadius: cfg.sunRadius, cam: CAM },
+    derivation,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c19 ring particle shadow ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5ringpart = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c19 ring particle shadow error: " + window.__p5ringpart.error;
+}
+</script>
+</body>
+</html>

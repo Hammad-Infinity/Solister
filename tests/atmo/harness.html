@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+{
+  "imports": {
+    "three": "../../vendor/three-r186/three.module.js",
+    "three/addons/": "../../vendor/three-r186/addons/"
+  }
+}
+</script>
+<title>Atmosphere lab</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #cfd6e4; font: 12px/1.4 ui-monospace, monospace; }
+  canvas { display: block; }
+  #log { white-space: pre-wrap; padding: 8px; }
+</style>
+</head>
+<body>
+<canvas id="view" width="512" height="512"></canvas>
+<div id="log">booting…</div>
+<script>
+// Minimal BodyShapes stub so the atmosphere module can derive real-scale
+// parameters without booting the whole app (values copied from
+// src/bodies/body-shapes.js).
+globalThis.BodyShapes = {
+  axesKm: {
+    mercury:[2440.53,2440.53,2438.26], venus:[6051.8,6051.8,6051.8],
+    earth:[6378.1366,6378.1366,6356.7519], mars:[3396.19,3396.19,3376.2],
+    jupiter:[71492,71492,66854], saturn:[60268,60268,54364],
+    uranus:[25559,25559,24973], neptune:[24764,24764,24341],
+    titan:[2575.15,2574.78,2574.47], pluto:[1188.3,1188.3,1188.3]
+  },
+  maxRadiusKm(key, fallback) {
+    const a = this.axesKm[key];
+    return a ? Math.max(...a) : fallback;
+  },
+  createGeometry(THREE, key, radius, w = 96, h = 48) {
+    const geometry = new THREE.SphereGeometry(radius, w, h);
+    const a = this.axesKm[key];
+    if (a) {
+      const m = Math.max(...a);
+      geometry.scale(a[0]/m, a[2]/m, a[1]/m);
+    }
+    return geometry;
+  }
+};
+</script>
+
+<script>
+/* log-depth chunk, mirrored from src/render/log-depth-glsl.js (that file is an ES module) */
+const LOG_DEPTH_GUARD = "#ifdef USE_LOGDEPTHBUF";
+globalThis.LDB_VERTEX_PARS = "\n" + LOG_DEPTH_GUARD + "\n#ifdef USE_LOGDEPTHBUF_EXT\nvarying float vLDBDepth;\nvarying float vLDBPerspective;\n#else\nuniform float logDepthBufFC;\n#endif\n#endif\n";
+globalThis.LDB_VERTEX_TAIL = "\n#ifdef USE_LOGDEPTHBUF\n#ifdef USE_LOGDEPTHBUF_EXT\nvLDBDepth = 1.0 + gl_Position.w;\nvLDBPerspective = isOrthographic ? 0.0 : 1.0;\n#else\nif (!isOrthographic) {\n    gl_Position.z = log2(max(1e-6, gl_Position.w + 1.0)) * logDepthBufFC - 1.0;\n    gl_Position.z *= gl_Position.w;\n}\n#endif\n#endif\n";
+globalThis.LDB_FRAGMENT_PARS = "\n#ifdef USE_LOGDEPTHBUF\n#ifdef USE_LOGDEPTHBUF_EXT\nuniform float logDepthBufFC;\nvarying float vLDBDepth;\nvarying float vLDBPerspective;\n#endif\n#endif\n";
+globalThis.LDB_FRAGMENT_HEAD = "\n#ifdef USE_LOGDEPTHBUF\n#ifdef USE_LOGDEPTHBUF_EXT\ngl_FragDepthEXT = vLDBPerspective == 0.0 ? gl_FragCoord.z : log2(vLDBDepth) * logDepthBufFC * 0.5;\n#endif\n#endif\n";
+</script>
+<script type="module" src="./lab.js"></script>
+</body>
+</html>

@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e8 — path-lines materials GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e8 path-lines starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD
+} from "../src/render/log-depth-glsl.js";
+import { createPathLines, createPathLineGeometry } from "../src/sim/path-lines.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import { vec4 } from "three/tsl";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  SphereGeometry as NodeSphereGeometry,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  AdditiveBlending as NodeAdditiveBlending,
+  DoubleSide as NodeDoubleSide,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// The ribbon-line materials of path-lines.js (base glow
+// fragment) and world-trails.js (the hover core fragment
+// swapped onto the same vertex) against their extracted
+// production assemblies. The path is one deterministic
+// eccentric inclined ellipse arc, emitted in production
+// draw()'s vertex order (6 vertices per segment, end
+// fades on corners 2/3/5, fade = (length span)^0.8) into
+// production's geometry layout on both sides.
+// Cases:
+//   0 glow, exterior camera
+//   1 glow, camera beside the path (near-plane cut paths)
+//   2 trail, no hover (production's 1.15*dpr*width)
+//   3 trail, hover (4.5*dpr*width, whitened tint + glow)
+//   4 glow at production's width clamp, occluder spheres
+//     in front of and behind the ribbon (log-depth order)
+//   5 glow, viewport uniform wider than the canvas
+//     (component-mixup trap for the screen-space normal)
+const NEAR = 0.5;
+const FAR = 5000;
+const TINT = 9623532; // production COLORS.earth
+const CAM_EXT = { pos: [0, 72, 152], look: [0, 0, 0] };
+const CASES = [
+  { kind: "glow-exterior", variant: "glow", halfWidth: 4, strength: 1.0, cam: CAM_EXT },
+  { kind: "glow-nearplane", variant: "glow", halfWidth: 4, strength: 1.0, cam: "onpath" },
+  { kind: "trail-plain", variant: "trail", hover: 0, dpr: 1, width: 2, halfWidth: 2.3, strength: 1.0, cam: CAM_EXT },
+  { kind: "trail-hover", variant: "trail", hover: 1, dpr: 1, width: 2, halfWidth: 9, strength: 0.85, cam: CAM_EXT },
+  { kind: "glow-occluders", variant: "glow", halfWidth: 9, strength: 0.7, cam: { pos: [0, 42, 96], look: [0, 0, 0] }, occluders: true },
+  { kind: "glow-wideviewport", variant: "glow", halfWidth: 5, strength: 1.0, cam: CAM_EXT, viewport: [512, 128] }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const logDepth = params.get("logdepth") !== "0";
+const cfg = CASES[caseIndex];
+
+window.__p5pl = { done: false, error: null };
+
+async function loadProduction() {
+  const [pathText, trailText] = await Promise.all([
+    fetch("../src/sim/path-lines.js").then(r => {
+      if (!r.ok) throw new Error("path-lines.js fetch failed: " + r.status);
+      return r.text();
+    }),
+    fetch("../src/sim/world-trails.js").then(r => {
+      if (!r.ok) throw new Error("world-trails.js fetch failed: " + r.status);
+      return r.text();
+    })
+  ]);
+  const tickChar = String.fromCharCode(96);
+  const literalOf = (text, marker, from = 0) => {
+    const at = text.indexOf(marker, from);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return text.slice(tick, end + 1);
+  };
+  const createAt = pathText.indexOf("create(info) {");
+  if (createAt < 0) throw new Error("PathLines.create not found");
+  const vertex = Function("LDB_VERTEX_PARS", "LDB_VERTEX_TAIL",
+    "return " + literalOf(pathText, "vertexShader:", createAt))(LDB_VERTEX_PARS, LDB_VERTEX_TAIL);
+  const glowFragment = Function("LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD",
+    "return " + literalOf(pathText, "fragmentShader:", createAt))(LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD);
+  const trailFragment = Function("LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD",
+    "return " + literalOf(trailText, "material.fragmentShader ="))(LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD);
+  if (!vertex.includes("aEnd") || !vertex.includes("vec4(2.0,2.0,2.0,1.0)") ||
+      !glowFragment.includes("0.62*exp(-80.0") ||
+      !trailFragment.includes("smoothstep(0.45,1.05,d)") || !trailFragment.includes("uHover")) {
+    throw new Error("extracted path-lines shaders do not look like production");
+  }
+  return { vertex, glowFragment, trailFragment };
+}
+
+// Deterministic eccentric inclined ellipse arc (92% of the
+// ellipse), fades by cumulative length with production's
+// FADE_CURVE_POWER 0.8.
+function buildPath() {
+  const a = 60, e = 0.45, n = 161;
+  const w = 0.6, inc = 0.42, Om = 0.75;
+  const cw = Math.cos(w), sw = Math.sin(w);
+  const ci = Math.cos(inc), si = Math.sin(inc);
+  const cO = Math.cos(Om), sO = Math.sin(Om);
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const E = (i / (n - 1)) * Math.PI * 2 * 0.92;
+    const x = a * (Math.cos(E) - e);
+    const y = a * Math.sqrt(1 - e * e) * Math.sin(E);
+    const x1 = cw * x - sw * y, y1 = sw * x + cw * y;
+    const y2 = ci * y1, z2 = si * y1;
+    pts.push([cO * x1 + sO * z2, y2, -sO * x1 + cO * z2]);
+  }
+  const cum = [0];
+  for (let i = 1; i < n; i++) {
+    const dx = pts[i][0] - pts[i - 1][0];
+    const dy = pts[i][1] - pts[i - 1][1];
+    const dz = pts[i][2] - pts[i - 1][2];
+    cum.push(cum[i - 1] + Math.hypot(dx, dy, dz));
+  }
+  const total = cum[n - 1];
+  const fades = cum.map(L => Math.pow(L / total, 0.8));
+  return { pts, fades };
+}
+
+// Production draw()'s per-segment emission into a geometry
+// built to production's layout (both sides).
+function fillGeometry(geometry, path) {
+  const { pts, fades } = path;
+  const positions = geometry.attributes.position.array;
+  const ends = geometry.attributes.aEnd.array;
+  const fadeArr = geometry.attributes.aFade.array;
+  const nSeg = pts.length - 1;
+  for (let s = 0; s < nSeg; s++) {
+    const A = pts[s], B = pts[s + 1];
+    const af = fades[s], bf = fades[s + 1];
+    const baseVertex = s * 6;
+    for (let corner = 0; corner < 6; corner++) {
+      const offset = (baseVertex + corner) * 3;
+      positions[offset] = A[0]; positions[offset + 1] = A[1]; positions[offset + 2] = A[2];
+      ends[offset] = B[0]; ends[offset + 1] = B[1]; ends[offset + 2] = B[2];
+      fadeArr[baseVertex + corner] = corner === 2 || corner === 3 || corner === 5 ? bf : af;
+    }
+  }
+  geometry.setDrawRange(0, nSeg * 6);
+  return nSeg;
+}
+
+// Production create()'s geometry assembly, verbatim.
+function buildClassicGeometry() {
+  const MAX_SEGMENTS = 4400;
+  const vertices = MAX_SEGMENTS * 6;
+  const geometry = new THREE.BufferGeometry();
+  for (const [name, size] of [["position", 3], ["aEnd", 3], ["aCorner", 2], ["aFade", 1]]) {
+    const attribute = new THREE.BufferAttribute(new Float32Array(vertices * size), size);
+    if (name !== "aCorner") attribute.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute(name, attribute);
+  }
+  const pattern = [0, -1, 0, 1, 1, -1, 1, -1, 0, 1, 1, 1];
+  for (let step = 0; step < MAX_SEGMENTS; step++) geometry.attributes.aCorner.array.set(pattern, step * 12);
+  geometry.setDrawRange(0, 0);
+  return geometry;
+}
+
+function cameraSpec(path) {
+  if (cfg.cam !== "onpath") return cfg.cam;
+  const base = path.pts[100];
+  const ahead = path.pts[132];
+  const dx = ahead[0] - base[0], dy = ahead[1] - base[1], dz = ahead[2] - base[2];
+  const dl = Math.hypot(dx, dy, dz);
+  const dir = [dx / dl, dy / dl, dz / dl];
+  // side = cross(dir, up) with up = (0, 1, 0)
+  const sx = -dir[2], sy = 0, sz = dir[0];
+  const sl = Math.hypot(sx, sy, sz) || 1;
+  const side = [sx / sl, sy / sl, sz / sl];
+  return {
+    pos: [base[0] + side[0] * 0.9, base[1] + side[1] * 0.9 + 0.35, base[2] + side[2] * 0.9],
+    look: ahead
+  };
+}
+
+function makeCamera(isNode, spec) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, NEAR, FAR);
+  camera.position.set(...spec.pos);
+  camera.lookAt(...spec.look);
+  return camera;
+}
+
+function occluderSpecs(path, spec) {
+  const C = spec.pos;
+  const front = path.pts[40];
+  const behind = path.pts[118];
+  const toBehind = [behind[0] - C[0], behind[1] - C[1], behind[2] - C[2]];
+  const bl = Math.hypot(...toBehind);
+  return [
+    {
+      pos: [front[0] + (C[0] - front[0]) * 0.42, front[1] + (C[1] - front[1]) * 0.42, front[2] + (C[2] - front[2]) * 0.42],
+      r: 6.5
+    },
+    {
+      pos: [behind[0] + toBehind[0] / bl * 26, behind[1] + toBehind[1] / bl * 26, behind[2] + toBehind[2] / bl * 26],
+      r: 8.5
+    }
+  ];
+}
+
+function buildGlslScene(prod, path, spec) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(false, spec);
+  scene.add(camera);
+  if (cfg.occluders) {
+    for (const o of occluderSpecs(path, spec)) {
+      const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.3, 0.32, 0.36) });
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(o.r, 48, 32), mat);
+      mesh.position.set(...o.pos);
+      scene.add(mesh);
+    }
+  }
+  const geometry = buildClassicGeometry();
+  fillGeometry(geometry, path);
+  const uniforms = {
+    tint: { value: new THREE.Color(TINT) },
+    viewport: { value: new THREE.Vector2(...(cfg.viewport || [size, size])) },
+    halfWidth: { value: cfg.halfWidth },
+    nearPlane: { value: NEAR },
+    strength: { value: cfg.strength }
+  };
+  if (cfg.variant === "trail") {
+    uniforms.uHover = { value: cfg.hover };
+    uniforms.uDpr = { value: cfg.dpr };
+    uniforms.uWidth = { value: cfg.width };
+  }
+  const material = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: prod.vertex,
+    fragmentShader: cfg.variant === "trail" ? prod.trailFragment : prod.glowFragment,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    toneMapped: false
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 1;
+  scene.add(mesh);
+  return { scene, camera };
+}
+
+function buildTslScene(path, spec) {
+  const scene = new NodeScene();
+  const camera = makeCamera(true, spec);
+  scene.add(camera);
+  if (cfg.occluders) {
+    for (const o of occluderSpecs(path, spec)) {
+      const material = new MeshBasicNodeMaterial({ name: "P5e8 occluder TSL" });
+      material.colorNode = vec4(0.3, 0.32, 0.36, 1.0);
+      const mesh = new NodeMesh(new NodeSphereGeometry(o.r, 48, 32), material);
+      mesh.position.set(...o.pos);
+      scene.add(mesh);
+    }
+  }
+  const geometry = createPathLineGeometry(NodeNS);
+  fillGeometry(geometry, path);
+  const slots = createPathLines({
+    logDepth,
+    variant: cfg.variant,
+    tint: new NodeColor(TINT),
+    viewport: cfg.viewport || [size, size],
+    halfWidth: cfg.halfWidth,
+    nearPlane: NEAR,
+    strength: cfg.strength,
+    hover: cfg.hover,
+    dpr: cfg.dpr,
+    width: cfg.width
+  });
+  const material = new MeshBasicNodeMaterial({ name: "P5e8 path lines TSL" });
+  material.transparent = true;
+  material.depthWrite = false;
+  material.depthTest = true;
+  material.blending = NodeAdditiveBlending;
+  material.side = NodeDoubleSide;
+  material.vertexNode = slots.vertexNode;
+  material.colorNode = slots.colorNode;
+  if (slots.depthNode) material.depthNode = slots.depthNode;
+  const mesh = new NodeMesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 1;
+  scene.add(mesh);
+  return { scene, camera };
+}
+
+
+try {
+  const prod = await loadProduction();
+  const path = buildPath();
+  const spec = cameraSpec(path);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod, path, spec) : buildTslScene(path, spec);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5pl = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    segments: path.pts.length - 1,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e8 path-lines ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5pl = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e8 path-lines error: " + window.__p5pl.error;
+}
+</script>
+</body>
+</html>

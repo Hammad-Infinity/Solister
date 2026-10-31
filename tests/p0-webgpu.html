@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P0 — three r186 WebGPU/TSL stock scene</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P0 starting…</div>
+<script type="module">
+import {
+  WebGPURenderer, Scene, PerspectiveCamera, BoxGeometry, Mesh,
+  MeshBasicNodeMaterial, Color, REVISION
+} from 'three/webgpu';
+import { color } from 'three/tsl';
+
+const status = document.getElementById('status');
+const params = new URLSearchParams(location.search);
+const requestedBackend = params.get('backend') || 'webgpu';
+const frameTarget = Math.max(5, Math.min(240, Number(params.get('frames') || 60) | 0));
+const size = Math.max(64, Math.min(512, Number(params.get('size') || 256) | 0));
+
+window.__p0 = { done: false, error: null, requestedBackend };
+
+const median = xs => xs.length ? xs[Math.floor(xs.length / 2)] : null;
+const p90 = xs => xs.length ? xs[Math.min(xs.length - 1, Math.floor(xs.length * 0.9))] : null;
+const stats = xs => {
+  const sorted = [...xs].sort((a, b) => a - b);
+  return {
+    count: sorted.length,
+    minMs: sorted.length ? +sorted[0].toFixed(3) : null,
+    medianMs: sorted.length ? +median(sorted).toFixed(3) : null,
+    p90Ms: sorted.length ? +p90(sorted).toFixed(3) : null,
+    maxMs: sorted.length ? +sorted[sorted.length - 1].toFixed(3) : null
+  };
+};
+
+try {
+  let adapterInfo = null;
+  if (navigator.gpu?.requestAdapter) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      const info = adapter?.info || null;
+      adapterInfo = info ? {
+        vendor: info.vendor || '', architecture: info.architecture || '',
+        device: info.device || '', description: info.description || ''
+      } : null;
+    } catch (e) {
+      adapterInfo = { error: String(e?.message || e) };
+    }
+  }
+
+  const canvas = document.getElementById('c');
+  const renderer = new WebGPURenderer({
+    canvas,
+    antialias: true,
+    alpha: false,
+    forceWebGL: requestedBackend === 'webgl'
+  });
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  await renderer.init();
+
+  const scene = new Scene();
+  scene.background = new Color(0x102040);
+  const camera = new PerspectiveCamera(45, 1, 0.1, 100);
+  camera.position.set(0, 0.8, 4.2);
+  camera.lookAt(0, 0, 0);
+
+  // The point of P0 in one object: a TSL node material, compiled by whichever
+  // backend this run selected. No ShaderMaterial, no GLSL string.
+  const material = new MeshBasicNodeMaterial({ name: 'P0 TSL cube' });
+  material.colorNode = color(0xff8844);
+  const cube = new Mesh(new BoxGeometry(1.35, 1.35, 1.35), material);
+  scene.add(cube);
+
+  const renderMs = [];
+  const frameMs = [];
+  let last = performance.now();
+  for (let i = 0; i < frameTarget; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const now = performance.now();
+    if (i > 0) frameMs.push(now - last);
+    last = now;
+    cube.rotation.x += 0.031;
+    cube.rotation.y += 0.047;
+    const t0 = performance.now();
+    renderer.render(scene, camera);
+    const dt = performance.now() - t0;
+    if (i >= 5) renderMs.push(dt); // skip first-compile warmup
+  }
+  // One extra frame after the loop so the screenshot cannot catch a cleared
+  // swap chain between presents.
+  renderer.render(scene, camera);
+
+  window.__p0 = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    userAgent: navigator.userAgent,
+    requestedBackend,
+    hasNavigatorGPU: !!navigator.gpu,
+    adapterInfo,
+    isWebGPURenderer: !!renderer.isWebGPURenderer,
+    isWebGPUBackend: !!renderer.backend?.isWebGPUBackend,
+    isWebGLBackend: !!renderer.backend?.isWebGLBackend,
+    backendName: renderer.backend?.constructor?.name || null,
+    tslColorNode: !!material.colorNode,
+    materialType: material.type,
+    frames: frameTarget,
+    drawCalls: renderer.info?.render?.calls ?? null,
+    renderCpu: stats(renderMs),
+    frameIntervals: stats(frameMs)
+  };
+  status.textContent = `P0 ${requestedBackend}: backend=${window.__p0.backendName} ` +
+    `webgpu=${window.__p0.isWebGPUBackend} webgl=${window.__p0.isWebGLBackend} ` +
+    `median render ${window.__p0.renderCpu.medianMs} ms`;
+  // Keep presenting the last frame while the probe screenshots it.
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p0 = { done: true, error: String(e?.stack || e), requestedBackend, revision: REVISION };
+  status.textContent = 'P0 error: ' + window.__p0.error;
+}
+</script>
+</body>
+</html>

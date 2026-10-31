@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e4 — body glow markers GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e4 body markers starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD
+} from "../src/render/log-depth-glsl.js";
+import { createBodyGlowMarker, createBodyGlowMarkerQuadGeometry } from "../src/core/body-glow-markers.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  NormalBlending as NodeNormalBlending,
+  REVISION
+} from "three/webgpu";
+import { vec4 } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// Marker sets per case. Production writes uPixels as device
+// pixels (css diameter <= 12 times dpr); case 0 uses that
+// production range, the giant cases scale the uniform only
+// (the P5c21 pattern: arithmetic unchanged, inputs bigger).
+// Tints come from production's extracted hex table; both
+// sides build the THREE.Color the same way production does.
+//   0 production sizes/opacities over a backdrop
+//   1 giant markers (profile arithmetic in interiors)
+//   2 giant markers behind an occluding sphere (GPU depth;
+//     production's extra JS occlusion stays JavaScript)
+//   3 opacity ramp at moderate size (alpha-discard ring)
+const CASES = [
+  {
+    occluder: false,
+    markers: [
+      { tint: "earth", pixels: 12, opacity: 1.0, pos: [-11, 5, -40] },
+      { tint: "mars", pixels: 9, opacity: 0.85, pos: [-4, -6, -40] },
+      { tint: "jupiter", pixels: 12, opacity: 0.6, pos: [3, 4, -40] },
+      { tint: "venus", pixels: 6, opacity: 0.9, pos: [9, -3, -40] },
+      { tint: "neptune", pixels: 3, opacity: 0.5, pos: [13, 7, -40] },
+      { tint: "saturn", pixels: 12, opacity: 0.25, pos: [-8, -1, -40] }
+    ]
+  },
+  {
+    occluder: false,
+    markers: [
+      { tint: "earth", pixels: 150, opacity: 0.9, pos: [-7, 2, -40] },
+      { tint: "mars", pixels: 110, opacity: 0.75, pos: [6, -3, -40] },
+      { tint: "venus", pixels: 90, opacity: 1.0, pos: [10, 7, -40] }
+    ]
+  },
+  {
+    occluder: true,
+    markers: [
+      { tint: "earth", pixels: 120, opacity: 0.95, pos: [2, 0, -40] },
+      { tint: "jupiter", pixels: 120, opacity: 0.9, pos: [7.5, 1, -40] },
+      { tint: "mars", pixels: 100, opacity: 1.0, pos: [-10, -4, -40] }
+    ]
+  },
+  {
+    occluder: false,
+    markers: [
+      { tint: "jupiter", pixels: 70, opacity: 0.03, pos: [-11, 4, -40] },
+      { tint: "earth", pixels: 70, opacity: 0.12, pos: [-4, -5, -40] },
+      { tint: "mars", pixels: 70, opacity: 0.4, pos: [4, 4, -40] },
+      { tint: "venus", pixels: 70, opacity: 1.0, pos: [11, -4, -40] }
+    ]
+  }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5markers = { done: false, error: null };
+
+async function loadProduction() {
+  const text = await fetch("../src/core/body-glow-markers.js").then(r => {
+    if (!r.ok) throw new Error("body-glow-markers.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalOf = (marker, from) => {
+    const at = text.indexOf(marker, from);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return text.slice(tick, end + 1);
+  };
+  const createAt = text.indexOf("create(key, body)");
+  if (createAt < 0) throw new Error("create(key, body) not found");
+  const ev = (lit) => Function(
+    "LDB_VERTEX_PARS", "LDB_VERTEX_TAIL", "LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD",
+    "return " + lit
+  )(LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD);
+  const vertexShader = ev(literalOf("vertexShader: ", createAt));
+  const fragmentShader = ev(literalOf("fragmentShader: ", createAt));
+  const tintAt = text.indexOf("const TINTS = ");
+  const tintEnd = text.indexOf("};", tintAt);
+  if (tintAt < 0 || tintEnd < 0) throw new Error("TINTS bounds not found");
+  const TINTS = Function("return " + text.slice(text.indexOf("{", tintAt), tintEnd + 1))();
+  if (!vertexShader.includes("uPixels") || !fragmentShader.includes("colorGlow") || !(TINTS.earth > 0)) {
+    throw new Error("extracted marker pieces do not look like production");
+  }
+  return { vertexShader, fragmentShader, TINTS };
+}
+
+function addBackdropAndOccluder(scene, T, isNode) {
+  // Numeric colour = working-space values, matching the raw
+  // vec4 on the TSL side (a hex colour would be sRGB-decoded).
+  if (isNode) {
+    const mat = new MeshBasicNodeMaterial({ name: "P5e4 backdrop TSL" });
+    mat.colorNode = vec4(0.16, 0.19, 0.25, 1.0);
+    const back = new NodeMesh(new NodePlaneGeometry(400, 400), mat);
+    back.position.set(0, 0, -80);
+    scene.add(back);
+    if (cfg.occluder) {
+      const om = new MeshBasicNodeMaterial({ name: "P5e4 occluder TSL" });
+      om.colorNode = vec4(0.30, 0.26, 0.22, 1.0);
+      const occ = new NodeMesh(new NodeSphereGeometry(5, 48, 32), om);
+      occ.position.set(2, 0, -20);
+      scene.add(occ);
+    }
+  } else {
+    const back = new T.Mesh(
+      new T.PlaneGeometry(400, 400),
+      new T.MeshBasicMaterial({ color: new T.Color(0.16, 0.19, 0.25) }));
+    back.position.set(0, 0, -80);
+    scene.add(back);
+    if (cfg.occluder) {
+      const occ = new T.Mesh(
+        new T.SphereGeometry(5, 48, 32),
+        new T.MeshBasicMaterial({ color: new T.Color(0.30, 0.26, 0.22) }));
+      occ.position.set(2, 0, -20);
+      scene.add(occ);
+    }
+  }
+}
+
+function buildGlslScene(prod) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.02, 2000);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  scene.add(camera);
+  addBackdropAndOccluder(scene, THREE, false);
+  for (const m of cfg.markers) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uOpacity: { value: m.opacity },
+        uPixels: { value: m.pixels },
+        uTint: { value: new THREE.Color(prod.TINTS[m.tint] || 15790312) }
+      },
+      vertexShader: prod.vertexShader,
+      fragmentShader: prod.fragmentShader,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.NormalBlending,
+      toneMapped: false,
+      fog: false
+    });
+    const point = new THREE.Points(geometry, material);
+    point.frustumCulled = false;
+    point.renderOrder = 5;
+    point.position.set(...m.pos);
+    scene.add(point);
+  }
+  return { scene, camera };
+}
+
+function buildTslScene(prod) {
+  const scene = new NodeScene();
+  const camera = new NodePerspectiveCamera(55, 1, 0.02, 2000);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  scene.add(camera);
+  addBackdropAndOccluder(scene, null, true);
+  const quad = createBodyGlowMarkerQuadGeometry(NodeNS);
+  for (const m of cfg.markers) {
+    const marker = createBodyGlowMarker({
+      opacity: m.opacity,
+      pixels: m.pixels,
+      tint: new NodeColor(prod.TINTS[m.tint] || 15790312),
+      viewport: [size, size]
+    });
+    const material = new MeshBasicNodeMaterial({ name: "P5e4 body marker TSL" });
+    material.transparent = true;
+    material.depthWrite = false;
+    material.depthTest = true;
+    material.blending = NodeNormalBlending;
+    material.toneMapped = false;
+    material.vertexNode = marker.vertexNode;
+    material.colorNode = marker.colorNode;
+    if (marker.depthNode) material.depthNode = marker.depthNode;
+    const mesh = new NodeMesh(quad, material);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 5;
+    mesh.position.set(...m.pos);
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProduction();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    // The seam's legacy path always uses production's primary
+    // configuration (MSAA on, log depth on); the node path must
+    // ask for the same sampling (P5e2 measurement).
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod) : buildTslScene(prod);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5markers = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    markerCount: cfg.markers.length,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e4 body markers ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5markers = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e4 body markers error: " + window.__p5markers.error;
+}
+</script>
+</body>
+</html>

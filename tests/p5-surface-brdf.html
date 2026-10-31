@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c22 — surface BRDF classic vs node</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 296px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="384" height="288"></canvas>
+<div id="status">P5c22 surface BRDF starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  dielectricF0,
+  glossinessToRoughness,
+  deriveSurfaceBrdfInstall,
+  applyDerivedSurfaceBrdf
+} from "../src/render/brdf/surface-brdf.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshPhysicalNodeMaterial,
+  MeshStandardNodeMaterial,
+  DirectionalLight as NodeDirectionalLight,
+  Color as NodeColor,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const W = 384, H = 288;
+const canvas = document.getElementById("c");
+// Frame cases: lit spheres (single directional light, no
+// environment) across both material families the production
+// applier writes to.
+const FRAME_CASES = [
+  { kind: "physical", key: "earth" },
+  { kind: "physical", key: "europa" },
+  { kind: "standard", key: "moon" },
+  { kind: "physical", key: "zzz-unknown" }
+];
+const caseIndex = Math.max(0, Math.min(FRAME_CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = FRAME_CASES[caseIndex];
+// Camera inside 1.6 radii so the disc overfills the frame:
+// no silhouette rim in frame (the P5c20 rim rule).
+const CAM = [0, 0.35, 1.55];
+const SUN = [2.5, 1.2, 2.2];
+
+window.__p5brdf = { done: false, error: null };
+window.THREE = THREE;
+
+let TABLE = null, DEFAULT_SURFACE = null;
+async function loadProduction() {
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "../src/render/brdf/surface-brdf.js";
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  if (typeof window.applySurfaceBrdf !== "function" || !window.SURFACE_BRDF) {
+    throw new Error("production surface BRDF did not load");
+  }
+  TABLE = window.SURFACE_BRDF;
+  DEFAULT_SURFACE = Function("return DEFAULT_SURFACE")();
+}
+
+function makeStub(kind) {
+  const stub = { roughness: 9, metalness: 9, userData: {} };
+  if (kind === "physical") Object.assign(stub, { ior: 0, specularIntensity: 0, specularColor: null });
+  if (kind === "physical-nocolor") Object.assign(stub, { ior: 0, specularIntensity: 0 });
+  if (kind === "specular-only") Object.assign(stub, { specularIntensity: 0, specularColor: null });
+  return stub;
+}
+
+function capture(stub, applied, initial) {
+  const out = { applied, roughness: stub.roughness, metalness: stub.metalness, userData: stub.userData.surfaceBrdf ?? null };
+  if ("ior" in initial) out.ior = stub.ior;
+  if ("specularIntensity" in initial) out.specularIntensity = stub.specularIntensity;
+  if ("specularColor" in initial) {
+    out.specularColor = stub.specularColor === null ? null : stub.specularColor.toArray();
+  }
+  return out;
+}
+
+function derivationCases() {
+  const kinds = ["physical", "physical-nocolor", "specular-only", "bare"];
+  const keys = ["earth", "hyperion", "zzz-unknown"];
+  const cases = [];
+  for (const kind of kinds) {
+    for (const key of keys) {
+      cases.push({ name: `${kind}/${key}`, kind, key });
+    }
+  }
+  cases.push({ name: "physical/falsy-key", kind: "physical", key: "" });
+  return cases.map((spec) => {
+    const initial = makeStub(spec.kind);
+    const prodStub = makeStub(spec.kind);
+    const appliedProd = window.applySurfaceBrdf(prodStub, spec.key, THREE);
+    const production = capture(prodStub, appliedProd, initial);
+
+    const install = deriveSurfaceBrdfInstall({
+      key: spec.key,
+      table: TABLE,
+      defaultSurface: DEFAULT_SURFACE,
+      hasIor: "ior" in initial,
+      hasSpecularIntensity: "specularIntensity" in initial,
+      hasSpecularColor: "specularColor" in initial,
+      colorAvailable: true
+    });
+    const tslStub = makeStub(spec.kind);
+    const appliedTsl = applyDerivedSurfaceBrdf(tslStub, install, THREE.Color);
+    const tsl = capture(tslStub, appliedTsl, initial);
+
+    return { name: spec.name, production, tsl };
+  });
+}
+
+function pureFnCases() {
+  const f0Inputs = [1.0, 1.31, 1.34, 1.5, 1.62, 2.4, 0, -1, NaN, Infinity, undefined];
+  const glossInputs = [0, 0.25, 0.5, 0.75, 1, 1.7, -0.3, NaN, undefined];
+  return [
+    ...f0Inputs.map(x => ({
+      fn: "dielectricF0", input: String(x),
+      production: String(window.dielectricF0(x)),
+      tsl: String(dielectricF0(x))
+    })),
+    ...glossInputs.map(x => ({
+      fn: "glossinessToRoughness", input: String(x),
+      production: String(window.glossinessToRoughness(x)),
+      tsl: String(glossinessToRoughness(x))
+    }))
+  ];
+}
+
+try {
+  await loadProduction();
+  const derivation = derivationCases();
+  const pureFns = pureFnCases();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material, light;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 100);
+    material = cfg.kind === "physical"
+      ? new THREE.MeshPhysicalMaterial({ color: 0x9a9a9a })
+      : new THREE.MeshStandardMaterial({ color: 0x9a9a9a });
+    window.applySurfaceBrdf(material, cfg.key, THREE);
+    mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 96, 64), material);
+    light = new THREE.DirectionalLight(0xffffff, 3);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(40, W / H, 0.01, 100);
+    material = cfg.kind === "physical"
+      ? new MeshPhysicalNodeMaterial({ color: 0x9a9a9a })
+      : new MeshStandardNodeMaterial({ color: 0x9a9a9a });
+    const install = deriveSurfaceBrdfInstall({
+      key: cfg.key,
+      table: TABLE,
+      defaultSurface: DEFAULT_SURFACE,
+      hasIor: "ior" in material,
+      hasSpecularIntensity: "specularIntensity" in material,
+      hasSpecularColor: "specularColor" in material,
+      colorAvailable: true
+    });
+    applyDerivedSurfaceBrdf(material, install, NodeColor);
+    mesh = new NodeMesh(new NodeSphereGeometry(1, 96, 64), material);
+    light = new NodeDirectionalLight(0xffffff, 3);
+  }
+  light.position.set(...SUN);
+  scene.add(light);
+  scene.add(mesh);
+  camera.position.set(...CAM);
+  camera.lookAt(0, 0, 0);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5brdf = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    width: W,
+    height: H,
+    caseShape: { kind: cfg.kind, key: cfg.key, sun: SUN, cam: CAM },
+    derivation,
+    pureFns,
+    appliedState: {
+      roughness: material.roughness,
+      metalness: material.metalness,
+      managed: !!material.userData.surfaceBrdf
+    },
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c22 surface BRDF ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5brdf = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c22 surface BRDF error: " + window.__p5brdf.error;
+}
+</script>
+</body>
+</html>

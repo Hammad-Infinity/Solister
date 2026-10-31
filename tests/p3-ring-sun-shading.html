@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P3 — ring sun shading GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P3 ring sun shading starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { ringSunShadingTerms } from "../src/shaders/ring-sun-shading.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { uv, vec3, vec4, float, cos, sin, abs, mix } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+const CAMERA_POS = [0, 0, 1];
+const CASES = [
+  { sun: [6, 4, 3], shine: [0, 0, 0], shineRadius: 1.0, normal: [0, 1, 0], density: 1.2, opacity: 0.9, glow: 0.4, shineStrength: 0.8 },
+  { sun: [-5, 2, -4], shine: [0.5, 0, 0], shineRadius: 0.8, normal: [0.3, 1, 0.2], density: 2.0, opacity: 0.7, glow: 0.8, shineStrength: 1.5 },
+  { sun: [2, -4, 5], shine: [-0.5, 0.25, 0], shineRadius: 1.3, normal: [-0.2, 1, -0.3], density: 0.6, opacity: 1.0, glow: 0.2, shineStrength: 0.4 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p3 = { done: false, error: null };
+
+async function loadRingSunGlsl() {
+  // Extract the exact production RING_SUN_FRAGMENT template literal. (The
+  // file also creates a THREE scratch vector at top level, so it cannot be
+  // classic-loaded into this bare harness; extraction avoids a copied shader.)
+  const text = await fetch("../src/shaders/ring-sun-shading.glsl.js").then(r => {
+    if (!r.ok) throw new Error("ring-sun-shading fetch failed: " + r.status);
+    return r.text();
+  });
+  const marker = "const RING_SUN_FRAGMENT = `";
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error("RING_SUN_FRAGMENT not found");
+  const tick = start + marker.length - 1;
+  const end = text.indexOf("`;", tick);
+  if (end < 0) throw new Error("RING_SUN_FRAGMENT terminator not found");
+  return Function("return " + text.slice(tick, end + 1))();
+}
+
+function makeGlslMaterial(glsl) {
+  return new THREE.ShaderMaterial({
+    name: "P3 ring sun shading GLSL reference",
+    uniforms: {
+      uRingSunPos: { value: new THREE.Vector3(...cfg.sun) },
+      uRingSunDensity: { value: cfg.density },
+      uRingSunOpacity: { value: cfg.opacity },
+      uRingSunGlow: { value: cfg.glow },
+      uRingSunGlowColor: { value: new THREE.Color(0xffffff) },
+      uRingShinePos: { value: new THREE.Vector3(...cfg.shine) },
+      uRingShineRadius: { value: cfg.shineRadius },
+      uRingShineStrength: { value: cfg.shineStrength },
+      uRingShineColor: { value: new THREE.Color(0xffffff) },
+      uTestNormal: { value: new THREE.Vector3(...cfg.normal) }
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      varying vec3 vRingSunWorld;
+      varying vec3 vRingSunNormal;
+      void main() {
+        vUv = uv;
+        vRingSunWorld = position;
+        vRingSunNormal = normal;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying vec2 vUv;
+      uniform vec3 uTestNormal;
+      ${glsl}
+      void main() {
+        float ang = vUv.x * 6.28318530718;
+        float rad = mix(1.2, 3.2, vUv.y);
+        vec3 p = uRingShinePos + vec3(cos(ang) * rad, (vUv.y - 0.5) * 0.1, sin(ang) * rad);
+        float a = 0.15 + 0.85 * abs(sin(ang * 4.0 + rad * 2.0));
+        vec3 terms = ringSunShadingTerms(p, uTestNormal, a);
+        gl_FragColor = vec4(terms, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P3 ring sun shading TSL" });
+  const pUv = uv();
+  const shine = vec3(...cfg.shine);
+  const ang = pUv.x.mul(6.28318530718);
+  const rad = mix(float(1.2), float(3.2), pUv.y);
+  const p = shine.add(vec3(cos(ang).mul(rad), pUv.y.sub(0.5).mul(0.1), sin(ang).mul(rad)));
+  const a = float(0.15).add(abs(sin(ang.mul(4.0).add(rad.mul(2.0)))).mul(0.85));
+  const terms = ringSunShadingTerms(
+    p,
+    vec3(...cfg.normal),
+    vec3(...CAMERA_POS),
+    a,
+    vec3(...cfg.sun),
+    float(cfg.density),
+    float(cfg.opacity),
+    float(cfg.glow),
+    shine,
+    float(cfg.shineRadius),
+    float(cfg.shineStrength)
+  );
+  material.colorNode = vec4(terms, float(1.0));
+  return material;
+}
+
+try {
+  const ringSunGlsl = impl === "glsl" ? await loadRingSunGlsl() : "";
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.set(...CAMERA_POS);
+    material = makeGlslMaterial(ringSunGlsl);
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.set(...CAMERA_POS);
+    material = makeTslMaterial();
+    mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p3 = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P3 ring sun shading ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p3 = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P3 ring sun shading error: " + window.__p3.error;
+}
+</script>
+</body>
+</html>

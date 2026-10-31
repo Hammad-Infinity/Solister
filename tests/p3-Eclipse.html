@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P3 — Eclipse visibility GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P3 Eclipse starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { solarVisibility } from "../src/shaders/eclipse.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { uv, vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+const CASES = [
+  { sun: [0, 0, 10], sunRadius: 1.0, occluder: [0, 0, 5], occluderRadius: 0.45 },
+  { sun: [0, 0, 10], sunRadius: 1.0, occluder: [0.35, 0.15, 5], occluderRadius: 0.25 },
+  { sun: [0, 0, 10], sunRadius: 1.0, occluder: [-0.25, -0.2, 4], occluderRadius: 0.8 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p3 = { done: false, error: null };
+
+async function loadEclipseGlsl() {
+  // The production GLSL helper is a string constant in state.js. Extract that
+  // exact template literal so this comparison cannot drift from production.
+  const text = await fetch("../src/app/state.js").then(r => {
+    if (!r.ok) throw new Error("state.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const marker = "const ECLIPSE_GLSL = `";
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error("ECLIPSE_GLSL not found in state.js");
+  const tick = start + marker.length - 1;
+  const end = text.indexOf("`;", tick);
+  if (end < 0) throw new Error("ECLIPSE_GLSL terminator not found");
+  const literal = text.slice(tick, end + 1);
+  return Function("return " + literal)();
+}
+
+function makeGlslMaterial(glsl) {
+  return new THREE.ShaderMaterial({
+    name: "P3 Eclipse GLSL reference",
+    uniforms: {
+      uEclipseMoon: { value: new THREE.Vector3(...cfg.occluder) },
+      uEclipseSun: { value: new THREE.Vector3(...cfg.sun) },
+      uEclipseMoonRadius: { value: cfg.occluderRadius },
+      uEclipseSunRadius: { value: cfg.sunRadius }
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying vec2 vUv;
+      ${glsl}
+      void main() {
+        vec3 p = vec3((vUv * 2.0 - 1.0) * 1.5, 0.0);
+        float v = solarVisibility(p);
+        gl_FragColor = vec4(v, 1.0 - v, v * v, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P3 Eclipse TSL" });
+  const pUv = uv();
+  const p = vec3(pUv.x.mul(2.0).sub(1.0).mul(1.5), pUv.y.mul(2.0).sub(1.0).mul(1.5), float(0.0));
+  const v = solarVisibility(
+    p,
+    vec3(cfg.occluder[0], cfg.occluder[1], cfg.occluder[2]),
+    vec3(...cfg.sun),
+    float(cfg.occluderRadius),
+    float(cfg.sunRadius)
+  );
+  material.colorNode = vec4(v, float(1.0).sub(v), v.mul(v), float(1.0));
+  return material;
+}
+
+try {
+  const EclipseGlsl = impl === "glsl" ? await loadEclipseGlsl() : "";
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeGlslMaterial(EclipseGlsl);
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeTslMaterial();
+    mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p3 = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P3 Eclipse ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p3 = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P3 Eclipse error: " + window.__p3.error;
+}
+</script>
+</body>
+</html>

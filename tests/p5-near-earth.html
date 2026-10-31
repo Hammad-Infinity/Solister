@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e6 — near-earth materials GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e6 near-earth starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD
+} from "../src/render/log-depth-glsl.js";
+import {
+  PROPAGATION_HEAD, propagationUniforms, packElements, makeAttributes, ATTR
+} from "../src/bodies/small-bodies/smallbody-gpu.js";
+import {
+  createNearEarthMarkers, createNearEarthMarkerGeometry,
+  createNearEarthRocks, createNearEarthRockGeometry
+} from "../src/bodies/small-bodies/near-earth.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  NormalBlending as NodeNormalBlending,
+  Vector3 as NodeVector3,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// Both material pairs of near-earth.js (markers + rocks)
+// against their extracted production assemblies, over the
+// same deterministic mixed population (free + resonant)
+// packed by production's own functions. The GLSL rocks use
+// production's deinterleaved attributes; the TSL side uses
+// the factories' interleaved geometry builders (P5e5
+// vertex-buffer limit). Cases:
+//   0 markers, production pixel regime, uDays 9000
+//   1 markers, uKm x3e7 (discs)
+//   2 rocks, uKm x6e6, uDays 9000
+//   3 rocks, uKm x6e6, uDays 0
+const AU = 30;
+const KM = AU / 149597870.7;
+const CASES = [
+  { kind: "markers", days: 9000, kmScale: 1 },
+  { kind: "markers", days: 9000, kmScale: 3e7 },
+  { kind: "rocks", days: 9000, kmScale: 6e6 },
+  { kind: "rocks", days: 0, kmScale: 6e6 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const logDepth = params.get("logdepth") !== "0";
+const cfg = CASES[caseIndex];
+
+window.__p5nea = { done: false, error: null };
+
+async function loadProduction() {
+  const [neaText, beltText] = await Promise.all([
+    fetch("../src/bodies/small-bodies/near-earth.js").then(r => {
+      if (!r.ok) throw new Error("near-earth.js fetch failed: " + r.status);
+      return r.text();
+    }),
+    fetch("../src/bodies/small-bodies/belt-factory.js").then(r => {
+      if (!r.ok) throw new Error("belt-factory.js fetch failed: " + r.status);
+      return r.text();
+    })
+  ]);
+  const tickChar = String.fromCharCode(96);
+  const vertexLiteral = (marker, from) => {
+    const at = neaText.indexOf(marker, from);
+    const tick = neaText.indexOf(tickChar, at);
+    const end = neaText.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("vertex literal bounds not found: " + marker);
+    return Function(
+      "LDB_VERTEX_PARS", "LDB_VERTEX_TAIL", "return " + neaText.slice(tick, end + 1)
+    )(LDB_VERTEX_PARS, LDB_VERTEX_TAIL);
+  };
+  const fragmentExpr = (from, endMarker) => {
+    const at = neaText.indexOf("fragmentShader: ", from);
+    const end = neaText.indexOf(endMarker, at);
+    if (at < 0 || end < 0) throw new Error("fragment bounds not found");
+    return Function(
+      "LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD",
+      "return (" + neaText.slice(at + "fragmentShader: ".length, end) + ")"
+    )(LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD);
+  };
+  const buildAt = neaText.indexOf("build() {");
+  const rocksAt = neaText.indexOf("buildRocks(n, attrs)");
+  if (buildAt < 0 || rocksAt < 0) throw new Error("near-earth build functions not found");
+  const markerVertex = PROPAGATION_HEAD + vertexLiteral("vertexShader: PROPAGATION_HEAD + ", buildAt);
+  const markerFragment = fragmentExpr(buildAt, ",\n            transparent:");
+  const rockVertex = PROPAGATION_HEAD + vertexLiteral("vertexShader = PROPAGATION_HEAD + ", rocksAt);
+  const rockFragment = fragmentExpr(rocksAt, ",\n            depthTest: true\n        });");
+  const colAt = neaText.indexOf("export const COLORS = ");
+  const colEnd = neaText.indexOf("const INNER_AU", colAt);
+  const tables = Function(
+    neaText.slice(colAt, colEnd).replace(/export /g, "") + "\nreturn { COLORS, ROCK_COLORS, markerColorFor };"
+  )();
+  const rockAt = beltText.indexOf("function createProceduralRockGeometry(");
+  const rockEnd = beltText.indexOf("function addAsteroidMarkers", rockAt);
+  if (rockAt < 0 || rockEnd < 0) throw new Error("rock geometry function not found");
+  const makeRock = Function(
+    beltText.slice(rockAt, rockEnd) + "\nreturn createProceduralRockGeometry;"
+  )();
+  if (!markerVertex.includes("propagateSmallBodyG") || !rockVertex.includes("aInner") ||
+      !rockFragment.includes("uInnerRockColor")) {
+    throw new Error("extracted near-earth shaders do not look like production");
+  }
+  return { markerVertex, markerFragment, rockVertex, rockFragment, ...tables, makeRock };
+}
+
+// Deterministic synthetic catalogue (free + tadpole +
+// horseshoe), packed by production's packElements.
+function buildPopulation(prod) {
+  let seed = 0x9e3779b9;
+  const rnd = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const TAU = Math.PI * 2;
+  const cat = { a: [], e: [], incRad: [], nodeRad: [], nodeDot: [], varpiRad: [], periDot: [], mRad: [], meanMotionDay: [], epochDays: [], radiusKm: [], flags: [] };
+  const holders = [];
+  const push = (fn) => { const j = cat.a.length; fn(j); holders.push(null); return j; };
+  const indices = [];
+  for (let i = 0; i < 150; i++) {
+    indices.push(push((j) => {
+      const a = 0.75 + rnd() * 1.15;
+      cat.a[j] = a;
+      cat.e[j] = rnd() * 0.55;
+      cat.incRad[j] = rnd() * 0.35;
+      cat.nodeRad[j] = rnd() * TAU;
+      cat.nodeDot[j] = (rnd() * 2 - 1) * 3e-6;
+      cat.varpiRad[j] = rnd() * TAU;
+      cat.periDot[j] = (rnd() * 2 - 1) * 4e-6;
+      cat.mRad[j] = rnd() * TAU;
+      cat.meanMotionDay[j] = 0.01720209895 / Math.pow(a, 1.5);
+      cat.epochDays[j] = (rnd() * 2 - 1) * 500;
+      cat.radiusKm[j] = 0.05 + rnd() * 7;
+      cat.flags[j] = rnd() < 0.25 ? 1 : 0;
+    }));
+  }
+  const addResonant = (tadpole) => {
+    const j = push((jj) => {
+      cat.a[jj] = 5.2;
+      cat.e[jj] = 0.02 + rnd() * 0.18;
+      cat.incRad[jj] = rnd() * 0.3;
+      cat.nodeRad[jj] = rnd() * TAU;
+      cat.nodeDot[jj] = (rnd() * 2 - 1) * 1e-6;
+      cat.varpiRad[jj] = rnd() * TAU;
+      cat.periDot[jj] = (rnd() * 2 - 1) * 2e-6;
+      cat.mRad[jj] = rnd() * TAU;
+      cat.meanMotionDay[jj] = 0.0014507;
+      cat.epochDays[jj] = (rnd() * 2 - 1) * 300;
+      cat.radiusKm[jj] = 0.5 + rnd() * 9;
+      cat.flags[jj] = 0;
+    });
+    holders[j] = {
+      state: tadpole ? {
+        libration: true, modulus: 0.2 + rnd() * 0.6, halfX0: -1.5 + rnd() * 3,
+        rateX: 0.0011 + rnd() * 0.0008, k: 0.55 + rnd() * 0.4,
+        center: rnd() < 0.5 ? 1.047 : -1.047, sigma0: rnd() * 2 - 1,
+        peri0: rnd() * TAU, lambdaJ0: 2.3, sign: 1,
+        nu: 0.0009 + rnd() * 0.0008, rates: { periDot: (rnd() * 2 - 1) * 2e-5 }
+      } : {
+        libration: false, type: "horseshoe", modulus: 0.85 + rnd() * 0.14,
+        halfX0: rnd() * 4, rateX: 0.0006 + rnd() * 0.0006, omega0: 0.001 + rnd() * 0.001,
+        center: 0, sigma0: rnd() * 2 - 1, peri0: rnd() * TAU, lambdaJ0: 2.3,
+        sign: rnd() < 0.5 ? -1 : 1, nu: 0.0012, rates: { periDot: (rnd() * 2 - 1) * 2e-5 }
+      }
+    };
+    indices.push(j);
+  };
+  for (let i = 0; i < 40; i++) addResonant(true);
+  for (let i = 0; i < 25; i++) addResonant(false);
+
+  const packed = packElements(cat, indices, holders);
+  const n = indices.length;
+  const colors = new Float32Array(n * 3);
+  const sizes = new Float32Array(n);
+  const inner = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    const j = indices[k];
+    const isInner = cat.a[j] * (1 + cat.e[j]) < 1.0017;
+    const c = prod.markerColorFor(isInner, !!cat.flags[j]);
+    colors[k * 3] = c[0]; colors[k * 3 + 1] = c[1]; colors[k * 3 + 2] = c[2];
+    sizes[k] = cat.radiusKm[j];
+    inner[k] = isInner ? 1 : 0;
+  }
+  return { packed, count: n, colors, sizes, inner };
+}
+
+function makeCamera(T, isNode) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, 0.1, 5000);
+  camera.position.set(0, 170, 230);
+  camera.lookAt(0, 0, 0);
+  return camera;
+}
+
+function buildGlslScene(prod, pop) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(THREE, false);
+  scene.add(camera);
+  if (cfg.kind === "markers") {
+    const attrs = makeAttributes(THREE, pop.packed, pop.count);
+    const geo = new THREE.BufferGeometry();
+    for (const [key, spec] of Object.entries(ATTR)) geo.setAttribute(spec.name, attrs[key]);
+    geo.setAttribute("color", new THREE.BufferAttribute(pop.colors, 3));
+    geo.setAttribute("aSize", new THREE.BufferAttribute(pop.sizes, 1));
+    geo.setDrawRange(0, pop.count);
+    const uniforms = {
+      ...propagationUniforms(THREE, { au: AU }),
+      uKm: { value: KM * cfg.kmScale },
+      uViewH: { value: size }
+    };
+    uniforms.uDays.value = cfg.days;
+    uniforms.uJupLambda.value = 2.3;
+    const mat = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: prod.markerVertex,
+      fragmentShader: prod.markerFragment,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false
+    });
+    const points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    scene.add(points);
+  } else {
+    globalThis.THREE = THREE;
+    const base = prod.makeRock(2);
+    const geo = new THREE.InstancedBufferGeometry();
+    for (const [key, attribute] of Object.entries(base.attributes)) geo.setAttribute(key, attribute);
+    if (base.index) geo.setIndex(base.index);
+    const attrs = makeAttributes(THREE, pop.packed, pop.count);
+    // Production buildRocks() puts these plain BufferAttributes
+    // on its InstancedBufferGeometry, so on the shipped path
+    // the element attributes advance per VERTEX and each rock
+    // vertex reads a different body's centre (shard soup --
+    // a standing production assembly defect, recorded in the
+    // roadmap, not fixed by this port). The reference here
+    // wraps the same arrays as instanced attributes: the
+    // per-instance semantics the production shader and its
+    // update() instanceCount logic plainly intend, and the
+    // semantics the node factory's interleaved attributes
+    // implement.
+    for (const [key, spec] of Object.entries(ATTR)) {
+      geo.setAttribute(spec.name,
+        new THREE.InstancedBufferAttribute(attrs[key].array, attrs[key].itemSize));
+    }
+    geo.setAttribute("aSize", new THREE.InstancedBufferAttribute(pop.sizes, 1));
+    geo.setAttribute("aInner", new THREE.InstancedBufferAttribute(pop.inner, 1));
+    geo.instanceCount = pop.count;
+    const uniforms = Object.assign(propagationUniforms(THREE, { au: AU }), {
+      uKm: { value: KM * cfg.kmScale },
+      uRockColor: { value: new THREE.Vector3(...prod.ROCK_COLORS.all) },
+      uInnerRockColor: { value: new THREE.Vector3(...prod.ROCK_COLORS.inner) }
+    });
+    uniforms.uDays.value = cfg.days;
+    uniforms.uJupLambda.value = 2.3;
+    const mat = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: prod.rockVertex,
+      fragmentShader: prod.rockFragment,
+      depthTest: true
+    });
+    const rocks = new THREE.Mesh(geo, mat);
+    rocks.frustumCulled = false;
+    scene.add(rocks);
+  }
+  return { scene, camera };
+}
+
+function buildTslScene(prod, pop) {
+  const scene = new NodeScene();
+  const camera = makeCamera(null, true);
+  scene.add(camera);
+  const prodUniforms = propagationUniforms(NodeNS, { au: AU });
+  const propagation = {
+    days: cfg.days,
+    au: AU,
+    resP: 1,
+    resQ: 1,
+    jupLambda: 2.3,
+    jupRate: prodUniforms.uJupRate.value,
+    harmSize: [prodUniforms.uHarmSize.value.x, prodUniforms.uHarmSize.value.y],
+    harmTexture: prodUniforms.uHarm.value
+  };
+  if (cfg.kind === "markers") {
+    const markers = createNearEarthMarkers({
+      logDepth,
+      propagation,
+      km: KM * cfg.kmScale,
+      viewH: size,
+      viewport: [size, size]
+    });
+    const material = new MeshBasicNodeMaterial({ name: "P5e6 NEA markers TSL" });
+    material.transparent = true;
+    material.depthTest = true;
+    material.depthWrite = false;
+    material.blending = NodeNormalBlending;
+    material.vertexNode = markers.vertexNode;
+    material.colorNode = markers.colorNode;
+    if (markers.depthNode) material.depthNode = markers.depthNode;
+    const mesh = new NodeMesh(createNearEarthMarkerGeometry(NodeNS, pop), material);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+  } else {
+    const rocks = createNearEarthRocks({
+      logDepth,
+      propagation,
+      km: KM * cfg.kmScale,
+      rockColor: prod.ROCK_COLORS.all,
+      innerRockColor: prod.ROCK_COLORS.inner
+    });
+    const material = new MeshBasicNodeMaterial({ name: "P5e6 NEA rocks TSL" });
+    material.depthTest = true;
+    material.vertexNode = rocks.vertexNode;
+    material.colorNode = rocks.colorNode;
+    if (rocks.depthNode) material.depthNode = rocks.depthNode;
+    globalThis.THREE = NodeNS;
+    const base = prod.makeRock(2);
+    const mesh = new NodeMesh(createNearEarthRockGeometry(NodeNS, base, pop), material);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProduction();
+  const pop = buildPopulation(prod);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod, pop) : buildTslScene(prod, pop);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5nea = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    bodies: pop.count,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e6 near-earth ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5nea = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e6 near-earth error: " + window.__p5nea.error;
+}
+</script>
+</body>
+</html>

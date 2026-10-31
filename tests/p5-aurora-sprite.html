@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c14 — aurora sprite vertex/log-depth GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5c14 aurora sprite vertex/log-depth starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD
+} from "../src/render/log-depth-glsl.js";
+import { createAuroraSprite } from "../src/bodies/planet-factory.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  InstancedBufferGeometry as NodeInstancedBufferGeometry,
+  Float32BufferAttribute as NodeFloat32BufferAttribute,
+  InstancedBufferAttribute as NodeInstancedBufferAttribute,
+  Sphere as NodeSphere,
+  Vector3 as NodeVector3,
+  Color as NodeColor,
+  AdditiveBlending as NodeAdditiveBlending,
+  DoubleSide as NodeDoubleSide,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const logdepth = params.get("logdepth") !== "0";
+const canvas = document.getElementById("c");
+
+// Earth's aurora profile on a unit planet, with the sprite mesh tilted
+// as production tilts it and an opaque unit sphere occluding the far
+// side of the oval. Camera near/far span 1e-6..1e5: at that ratio a
+// linear depth buffer cannot separate the sprite bases (1.008 radii)
+// from the surface, so correct occlusion in the frame is itself
+// evidence that logarithmic depth is active and agreeing. The disc
+// overfills the frame in every case: a visible silhouette would put
+// a 1px legacy-vs-node rasterization rim around the limb that says
+// nothing about the aurora (the P5c8 rig trap), while the occlusion
+// proof only gets stronger -- far-side sprites sit behind the disc
+// interior everywhere. uTime/uIntensity/uSunWorldPos are the uniforms
+// production animates from its effects pass; the rig pins them per
+// case, identically on both sides.
+const CASES = [
+  { time: 37.5, intensity: 1.3, camPos: [-1.33, 1.93, 1.12], camTarget: [0, 0, 0], sunPos: [6, 1.5, -3] },
+  { time: 90.25, intensity: 1.3, camPos: [-0.82, 1.74, 1.75], camTarget: [0, 0, 0], sunPos: [5, -2, -4] },
+  { time: 5.0, intensity: 1.8, camPos: [1.33, 1.93, -1.12], camTarget: [0, 0, 0], sunPos: [-6, 1, 3] }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+const OCCLUDER_RGB = [0.10, 0.14, 0.19];
+
+async function loadProduction() {
+  const text = await fetch("../src/bodies/planet-factory.js").then(r => {
+    if (!r.ok) throw new Error("planet-factory.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const tickChar = String.fromCharCode(96);
+  const literalOf = marker => {
+    const at = text.indexOf(marker);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return text.slice(tick, end + 1);
+  };
+  const profilesAt = text.indexOf("const AURORA_PROFILES = ");
+  const profilesEnd = text.indexOf("\n};", profilesAt);
+  if (profilesAt < 0 || profilesEnd < 0) throw new Error("AURORA_PROFILES bounds not found");
+  const profiles = Function(
+    "return " + text.slice(profilesAt + "const AURORA_PROFILES = ".length, profilesEnd + 2))();
+  const noise = Function("return " + literalOf("const AURORA_SE_NOISE = "))();
+  const vertexShader = Function(
+    "LDB_VERTEX_PARS", "LDB_VERTEX_TAIL", "AURORA_SE_NOISE",
+    "return " + literalOf("const AURORA_SPRITE_VERTEX = ")
+  )(LDB_VERTEX_PARS, LDB_VERTEX_TAIL, noise);
+  const fragmentShader = Function(
+    "LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD", "AURORA_SE_NOISE",
+    "return " + literalOf("const AURORA_SPRITE_FRAGMENT = ")
+  )(LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD, noise);
+  const geoAt = text.indexOf("function createAuroraSpriteGeometry");
+  const geoEnd = text.indexOf("\n}\n", geoAt);
+  if (geoAt < 0 || geoEnd < 0) throw new Error("createAuroraSpriteGeometry bounds not found");
+  const geometryFactory = three => Function(
+    "THREE", text.slice(geoAt, geoEnd + 2) + "\nreturn createAuroraSpriteGeometry;")(three);
+  if (!vertexShader.includes("detailFbm4") || !fragmentShader.includes("gl_FragColor") ||
+      !profiles.earth || profiles.earth.mode !== 0) {
+    throw new Error("extracted production pieces do not look like the aurora sprite material");
+  }
+  return { profiles, vertexShader, fragmentShader, geometryFactory };
+}
+
+function productionUniformValues(profile) {
+  // The mode-0 branch of createPlanetAurora, for radius 1 and unit axes.
+  return {
+    seed: ("earth".length * 7.13) % 10,
+    baseR: 1.008,
+    height: (profile.height || 0.08) * 2.1,
+    width: 2 * Math.PI * Math.cos(profile.ovalLat) / 260 * 2.3,
+    axes: [1, 1, 1]
+  };
+}
+
+function makeGlslAurora(prod, profile) {
+  const u = productionUniformValues(profile);
+  const material = new THREE.ShaderMaterial({
+    // Production's LDB chunks guard on USE_LOGDEPTHBUF, the pre-r163
+    // three define name; r186 emits USE_LOGARITHMIC_DEPTH_BUFFER
+    // instead, so in the running production build every LDB chunk in
+    // every ShaderMaterial compiles to a no-op and those materials
+    // depth-test linear depth against log-depth surfaces. Defining
+    // the old name here runs the extracted shader with its chunks
+    // active, as written -- that is the reference the node port must
+    // match, because the flipped all-node scene is log-depth
+    // throughout. The stale guard itself is a production defect for
+    // its own fix step (roadmap P5c14 finding); this rig does not
+    // touch production files. (&ldb=0 reproduces the production
+    // build as it runs today, chunks dead, for comparison.)
+    defines: params.get("ldb") === "0" ? {} : { USE_LOGDEPTHBUF: "" },
+    uniforms: {
+      uTime: { value: cfg.time },
+      uIntensity: { value: cfg.intensity },
+      uSunWorldPos: { value: new THREE.Vector3(...cfg.sunPos) },
+      uColorA: { value: new THREE.Color(...profile.colorA) },
+      uColorB: { value: new THREE.Color(...profile.colorB) },
+      uColorC: { value: new THREE.Color(...profile.colorC) },
+      uSeed: { value: u.seed },
+      uBaseR: { value: u.baseR },
+      uHeight: { value: u.height },
+      uWidth: { value: u.width },
+      uAxes: { value: new THREE.Vector3(...u.axes) }
+    },
+    vertexShader: prod.vertexShader,
+    fragmentShader: prod.fragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    toneMapped: false
+  });
+  const mesh = new THREE.Mesh(prod.geometryFactory(THREE)("earth", 1, profile), material);
+  mesh.rotation.set(profile.tiltX, 0, profile.tiltZ);
+  mesh.renderOrder = 7;
+  mesh.frustumCulled = false;
+  return { mesh, material };
+}
+
+function makeTslAurora(prod, profile) {
+  const u = productionUniformValues(profile);
+  const material = new MeshBasicNodeMaterial({ name: "P5c14 aurora sprite TSL" });
+  material.transparent = true;
+  material.depthWrite = false;
+  material.depthTest = true;
+  material.blending = NodeAdditiveBlending;
+  material.side = NodeDoubleSide;
+  material.toneMapped = false;
+  const rgb = arr => { const c = new NodeColor(...arr); return [c.r, c.g, c.b]; };
+  const sprite = createAuroraSprite({
+    time: cfg.time,
+    intensity: cfg.intensity,
+    sunWorldPos: cfg.sunPos,
+    seed: u.seed,
+    baseR: u.baseR,
+    height: u.height,
+    width: u.width,
+    axes: u.axes,
+    colorA: rgb(profile.colorA),
+    colorB: rgb(profile.colorB),
+    colorC: rgb(profile.colorC),
+    logDepth: logdepth
+  });
+  material.vertexNode = sprite.vertexNode;
+  material.colorNode = sprite.colorNode;
+  if (sprite.depthNode !== null) material.depthNode = sprite.depthNode;
+  // Diagnostic: &diag=depthoff disables the depth test, isolating
+  // the arithmetic from depth behaviour.
+  if (params.get("diag") === "depthoff") material.depthTest = false;
+  const three = {
+    InstancedBufferGeometry: NodeInstancedBufferGeometry,
+    Float32BufferAttribute: NodeFloat32BufferAttribute,
+    InstancedBufferAttribute: NodeInstancedBufferAttribute,
+    Sphere: NodeSphere,
+    Vector3: NodeVector3
+  };
+  const mesh = new NodeMesh(prod.geometryFactory(three)("earth", 1, profile), material);
+  mesh.rotation.set(profile.tiltX, 0, profile.tiltZ);
+  mesh.renderOrder = 7;
+  mesh.frustumCulled = false;
+  return { mesh, material };
+}
+
+try {
+  const prod = await loadProduction();
+  const profile = prod.profiles.earth;
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: logdepth
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  let scene, camera, aurora;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(30, 1, 1e-6, 1e5);
+    const occluder = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 96, 64),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(...OCCLUDER_RGB) }));
+    scene.add(occluder);
+    aurora = makeGlslAurora(prod, profile);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(30, 1, 1e-6, 1e5);
+    const occluderMaterial = new MeshBasicNodeMaterial({ name: "P5c14 occluder" });
+    occluderMaterial.color = new NodeColor(...OCCLUDER_RGB);
+    const occluder = new NodeMesh(new NodeSphereGeometry(1, 96, 64), occluderMaterial);
+    scene.add(occluder);
+    aurora = makeTslAurora(prod, profile);
+  }
+  camera.position.set(...cfg.camPos);
+  camera.lookAt(...cfg.camTarget);
+  scene.add(aurora.mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5aurora = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    logdepth,
+    ldbDefine: impl === "glsl" ? params.get("ldb") !== "0" : null,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? null,
+    spriteInstances: aurora.mesh.geometry.instanceCount ?? null,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: aurora.material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c14 aurora sprite ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5aurora = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c14 aurora sprite error: " + window.__p5aurora.error;
+}
+</script>
+</body>
+</html>

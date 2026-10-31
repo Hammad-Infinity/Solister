@@ -4,12 +4,58 @@ export class TextureRequests {
         this.loader = new THREE.TextureLoader;
         this.ktx2Loader = null;
         this.ktx2Unavailable = false;
-        this.transcoderPath = "./vendor/basis/";
+        // Empty keeps KTX2Loader's own default: the basis transcoder beside
+        // the vendored addon (vendor/three-r186/addons/libs/basis/).
+        this.transcoderPath = "";
         this.limit = concurrency;
         this.active = 0;
         this.queue = [];
         this.versions = new Map;
         this.inflight = new Set;
+        this.lifecycle = [];
+        this.stuckMs = 90000;
+        this._timer = typeof setInterval === "function" ? setInterval(() => this.sweep(), 15000) : null;
+    }
+    _note(q, state) {
+        try {
+            this.lifecycle.push({
+                t: Date.now(),
+                state: state,
+                url: q.url,
+                channel: q.channel,
+                ageMs: q.startedAt ? Date.now() - q.startedAt : 0
+            });
+            if (this.lifecycle.length > 300) this.lifecycle.splice(0, this.lifecycle.length - 300);
+        } catch (e) {}
+    }
+    sweep() {
+        const now = Date.now();
+        for (const q of [ ...this.inflight ]) {
+            if (!q.startedAt || now - q.startedAt <= this.stuckMs) continue;
+            this.record("texture-request-stuck", q.url, "busy for " + Math.round((now - q.startedAt) / 1000) + "s with no callback; slot released");
+            this._note(q, "stuck-released");
+            try {
+                q.cancelled = true;
+                q.onCancel?.();
+            } catch (e) {}
+            try {
+                q._finish?.();
+            } catch (e) {}
+        }
+    }
+    stats() {
+        const now = Date.now();
+        return {
+            limit: this.limit,
+            active: this.active,
+            queued: this.queue.length,
+            queue: this.queue.map(q => q.url),
+            inflight: [ ...this.inflight ].map(q => ({
+                url: q.url,
+                ageMs: q.startedAt ? now - q.startedAt : null
+            })),
+            lifecycle: this.lifecycle.slice(-25)
+        };
     }
     record(type, url, error) {
         try {
@@ -122,14 +168,18 @@ export class TextureRequests {
             }
             this.active++;
             this.inflight.add(q);
+            q.startedAt = Date.now();
+            this._note(q, "started");
             let ended = false;
             const finish = () => {
                 if (ended) return;
                 ended = true;
+                this._note(q, q.failed ? "failed" : q.delivered ? "ok" : q.cancelled ? "cancelled" : "ended-without-delivery");
                 this.inflight.delete(q);
                 this.active--;
                 this.pump();
             };
+            q._finish = finish;
             let loader;
             try {
                 loader = this.loaderFor(q.url);
@@ -138,6 +188,7 @@ export class TextureRequests {
                     if (this.current(q)) {
                         q.delivered = true;
                         this.record("texture-loader-unavailable", q.url, error);
+                        q.failed = true;
                         q.onError?.(error);
                     } else this.cancel(q);
                 } catch (callbackError) {
@@ -177,6 +228,7 @@ export class TextureRequests {
                         if (this.current(q)) {
                             q.delivered = true;
                             this.record("texture-load-failed", q.url, error);
+                            q.failed = true;
                             q.onError?.(error);
                         } else this.cancel(q);
                     } catch (callbackError) {
@@ -190,6 +242,7 @@ export class TextureRequests {
                     if (this.current(q)) {
                         q.delivered = true;
                         this.record("texture-request-failed", q.url, error);
+                        q.failed = true;
                         q.onError?.(error);
                     } else this.cancel(q);
                 } catch (callbackError) {

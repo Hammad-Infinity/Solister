@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c15 — atmosphere shell factory derivation GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  #status { position: fixed; left: 8px; top: 8px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="status">P5c15 atmosphere shell factory derivation starting…</div>
+<script type="module">
+import * as THREE from "three";
+import {
+  deriveAtmosphereShellInstall
+} from "../src/shaders/planet-atmosphere.tsl.js";
+
+const status = document.getElementById("status");
+const note = (t) => { status.textContent += "\n" + t; };
+
+// Stubs for the production factory's environment. createPlanetAtmosphere
+// reads BodyShapes for radii/axes/geometry, the eclipse globals for the
+// earth splice, the renderer for table precision, and optionally the
+// LUT builder / analytic table getters; none of those are under test
+// here (their outputs are derivation inputs), so they are replaced
+// with recorders. The atmosphere profiles are the file's own derived
+// database with no reference-model overlay (ATMOSPHERE_REFERENCE_MODELS
+// undefined), identical on both sides.
+window.THREE = THREE;
+const RADIUS_KM = {
+  mercury: 2439.7, venus: 6051.8, earth: 6371, mars: 3389.5,
+  jupiter: 69911, titan: 2575.5, saturn: 58232, uranus: 25362,
+  neptune: 24622, pluto: 1188.3
+};
+const AXES_KM = {
+  jupiter: [71492, 71492, 66854],
+  saturn: [60268, 60268, 54364],
+  earth: [6378.137, 6378.137, 6356.752]
+};
+let lastGeometry = null;
+window.BodyShapes = {
+  maxRadiusKm: (key) => RADIUS_KM[key],
+  axesKm: AXES_KM,
+  createGeometry(three, key, radius, w, h) {
+    lastGeometry = { radius, segments: [w, h] };
+    return new three.SphereGeometry(radius, 8, 8);
+  }
+};
+window.eclipseUniforms = {};
+window.ECLIPSE_GLSL = "ECLIPSE_SOURCE_STUB";
+
+// The log-depth chunks are an ES module that also assigns the LDB_*
+// globals the classic atmosphere file interpolates; import first,
+// exactly the production order.
+await import("../src/render/log-depth-glsl.js");
+await new Promise((resolve, reject) => {
+  const script = document.createElement("script");
+  script.src = "../src/shaders/planet-atmosphere.glsl.js";
+  script.onload = resolve;
+  script.onerror = reject;
+  document.head.appendChild(script);
+});
+if (typeof window.createPlanetAtmosphere !== "function" ||
+    typeof window.brunetonParamsForBody !== "function") {
+  throw new Error("production atmosphere factory did not load");
+}
+note("production atmosphere factory loaded");
+
+const OD_TABLE = {
+  half: new Uint16Array(4), packed: new Uint8Array(4),
+  width: 1, height: 1, sampleCoeff: { x: 0.5, y: 0.25 }, encodedMax: 7
+};
+const MS_TABLE = {
+  half: new Uint16Array(4), packed: new Uint8Array(4),
+  width: 1, height: 1, encodeScale: 3
+};
+const LUTS_MIE_G = 0.42;
+
+function setupEnv(testCase) {
+  window.cloudMeshes = {};
+  window.renderer = { capabilities: { isWebGL2: testCase.webgl2 !== false } };
+  if (testCase.tier) window.__solisterGraphicsTier = testCase.tier;
+  else delete window.__solisterGraphicsTier;
+  delete window.__solisterForceMarch;
+  if (testCase.se) {
+    window.__solisterForceTables = 1;
+    window.buildBrunetonLuts = () => ({
+      transmittance: {}, irradiance: {}, inscatter: {},
+      params: { mieG: LUTS_MIE_G }
+    });
+  } else {
+    delete window.__solisterForceTables;
+    delete window.buildBrunetonLuts;
+  }
+  if (testCase.od) window.getTransmittanceTable = () => OD_TABLE;
+  else delete window.getTransmittanceTable;
+  if (testCase.ms) window.getMultipleScatterTable = () => MS_TABLE;
+  else delete window.getMultipleScatterTable;
+  lastGeometry = null;
+}
+
+function norm(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map(norm);
+  if (value.isVector2) return [value.x, value.y];
+  if (value.isVector3) return [value.x, value.y, value.z];
+  if (value.isColor) return [value.r, value.g, value.b];
+  if (value.isMatrix3) {
+    const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    return value.elements.every((e, i) => e === identity[i])
+      ? "identity" : [...value.elements];
+  }
+  return "object";
+}
+
+const MATERIAL_FIELDS = [
+  "transparent", "depthWrite", "depthTest", "side", "forceSinglePass",
+  "blending", "blendEquation", "blendSrc", "blendDst",
+  "blendEquationAlpha", "blendSrcAlpha", "blendDstAlpha",
+  "premultipliedAlpha", "toneMapped", "fog"
+];
+
+function productionShape(shell) {
+  if (!shell) return null;
+  const material = shell.material;
+  const fragment = material.fragmentShader;
+  const kind = material.uniforms.uTransmittanceLut !== undefined
+    ? "se" : "analytic";
+  const uniforms = {};
+  const declaredOnly = [];
+  for (const [name, slot] of Object.entries(material.uniforms)) {
+    uniforms[name] = norm(slot.value);
+    // Declared but never used: one word-boundary occurrence (the
+    // declaration itself), or none at all.
+    const hits = (fragment.match(new RegExp("\\b" + name + "\\b", "g")) || []).length;
+    if (hits <= 1) declaredOnly.push(name);
+  }
+  const materialFields = {};
+  for (const field of MATERIAL_FIELDS) materialFields[field] = material[field];
+  return {
+    kind,
+    defines: material.defines && Object.keys(material.defines).length
+      ? { ...material.defines } : null,
+    uniforms,
+    declaredOnly: declaredOnly.sort(),
+    material: materialFields,
+    mesh: {
+      renderOrder: shell.renderOrder,
+      name: shell.name,
+      isAtmosphere: shell.userData.isAtmosphere === true,
+      raycastDisabled: shell.raycast !== THREE.Mesh.prototype.raycast
+    },
+    geometry: lastGeometry,
+    eclipseWired: fragment.includes("solarVisibility(vWorldPos)"),
+    // Since P5d3 the splice inserts before the eclipse term: the
+    // multiply must survive in BOTH assemblies, and the inside
+    // block's marker must be present in both.
+    eclipseMultiplyPresent: fragment.includes("radiance *= eclipseVisibility;"),
+    insideSkyPresent: fragment.includes("SKY_SAMPLES_MAX"),
+    viewSamples: kind === "analytic"
+      ? Number(fragment.match(/i < (\d+);/)?.[1] ?? NaN) : null
+  };
+}
+
+function tslShape(key, der) {
+  if (!der) return null;
+  const o = der.shellOptions;
+  const uniforms = {
+    intensity: norm(o.intensity),
+    uBodyCenterView: norm(o.bodyCenterView),
+    uBodyRadius: norm(o.bodyRadius),
+    uShellRadius: norm(o.shellRadius),
+    uBodyAxisScale: norm(o.bodyAxisScale),
+    uViewToBodyLocal: o.viewToBodyLocal === undefined ? "identity" : "custom",
+    uInsideShell: norm(o.insideShell),
+    uSunIntensity: norm(o.sunIntensity),
+    uSunDir: norm(o.sunDir)
+  };
+  if (der.kind === "se") {
+    uniforms.uTransmittanceLut = norm(o.transmittanceLut);
+    uniforms.uInscatterLut = norm(o.inscatterLut);
+    uniforms.uRgKm = norm(o.rgKm);
+    uniforms.uRtNorm = norm(o.rtNorm);
+    uniforms.uMieG = norm(o.mieG);
+    uniforms.uMieTint = norm(o.mieTint);
+    uniforms.uMieFade = norm(o.mieFade);
+    uniforms.uLutGain = norm(o.lutGain);
+    uniforms.uEyeHeightR = norm(o.insideSky.eyeHeightR);
+    uniforms.uSkySamples = norm(o.insideSky.skySamples);
+    uniforms.uBetaR = norm(o.insideSky.betaR);
+    uniforms.uBetaMS = norm(o.insideSky.betaMS);
+    uniforms.uBetaMX = norm(o.insideSky.betaMX);
+    uniforms.uHR = norm(o.insideSky.HR);
+    uniforms.uHM = norm(o.insideSky.HM);
+    uniforms.uSkyGain = norm(o.insideSky.skyGain);
+  } else {
+    uniforms.uEyeHeightR = norm(o.insideSky.eyeHeightR);
+    uniforms.uSkySamples = norm(o.insideSky.skySamples);
+    uniforms.uLimbDarken = norm(o.limbDarken);
+    uniforms.uHaloEdgeStart = norm(o.haloEdgeStart);
+    uniforms.uBacklightLevel = norm(o.backlightLevel);
+    uniforms.uDarkOcclusion = norm(o.darkOcclusion);
+    uniforms.uScaleHeightR = norm(o.scaleHeightR);
+    uniforms.uScaleHeightM = norm(o.scaleHeightM);
+    uniforms.uTauRayleigh = norm(o.tauRayleigh);
+    uniforms.uTauMieScatter = norm(o.tauMieScatter);
+    uniforms.uTauMieExt = norm(o.tauMieExt);
+    uniforms.uMieG = norm(o.mieG);
+    uniforms.uMieTint = norm(o.mieTint);
+    uniforms.uAbsorbTau = norm(o.absorbTau);
+    uniforms.uBandTau = norm(o.bandTau);
+    uniforms.uBandCenter = norm(o.bandCenter);
+    uniforms.uBandWidth = norm(o.bandWidth);
+    uniforms.uBandNorm = norm(o.bandNorm);
+    uniforms.uOpticalDepth = norm(o.opticalDepth);
+    uniforms.uOpticalDepthCoeff = norm(o.opticalDepthCoeff);
+    uniforms.uHasOpticalDepth = norm(o.hasOpticalDepth);
+    uniforms.uOpticalDepthMax = norm(o.opticalDepthMax);
+    uniforms.uMsTable = norm(o.msTable);
+    uniforms.uHasMs = norm(o.hasMs);
+    uniforms.uMsScale = norm(o.msScale);
+    uniforms.uBetaR = norm(o.insideSky.betaR);
+    uniforms.uBetaMS = norm(o.insideSky.betaMS);
+    uniforms.uBetaMX = norm(o.insideSky.betaMX);
+    uniforms.uHR = norm(o.insideSky.HR);
+    uniforms.uHM = norm(o.insideSky.HM);
+    uniforms.uRtNorm = norm(o.insideSky.rtNorm);
+    uniforms.uSkyGain = norm(o.insideSky.skyGain);
+  }
+  return {
+    kind: der.kind,
+    defines: der.kind === "analytic"
+      ? { ATMOSPHERE_HAS_BAND: o.hasBand ? 1 : 0 } : null,
+    uniforms,
+    declaredOnly: null,
+    material: { ...der.materialParameters },
+    mesh: {
+      renderOrder: der.meshParameters.renderOrder,
+      name: key + der.meshParameters.nameSuffix,
+      isAtmosphere: der.meshParameters.isAtmosphere,
+      raycastDisabled: der.meshParameters.raycastDisabled
+    },
+    geometry: { radius: der.shellRadius, segments: der.segments },
+    eclipseWired: der.eclipse,
+    // Both TSL factories apply the Eclipse input after the inside
+    // block (P5d3); the shader rigs prove it numerically.
+    eclipseMultiplyPresent: true,
+    insideSkyPresent: !!o.insideSky,
+    viewSamples: o.viewSamples ?? null
+  };
+}
+
+function runCase(testCase) {
+  setupEnv(testCase);
+  const profile = testCase.profile !== undefined
+    ? testCase.profile
+    : window.PLANET_ATMOSPHERE_PROFILES[testCase.key];
+  const radiusUnits = testCase.radiusUnits
+    ?? ((RADIUS_KM[testCase.key] || 1000) / 100);
+  const body = new THREE.Mesh(
+    new THREE.SphereGeometry(Math.max(radiusUnits, 1e-9), 8, 8),
+    new THREE.MeshBasicMaterial()
+  );
+  body.geometry.parameters.radius = radiusUnits;
+  const shell = window.createPlanetAtmosphere(testCase.key, body, profile);
+  const production = productionShape(shell);
+
+  let brunetonParams = null;
+  try {
+    brunetonParams = window.brunetonParamsForBody(testCase.key, profile);
+  } catch { brunetonParams = null; }
+  const der = deriveAtmosphereShellInstall({
+    key: testCase.key,
+    profile,
+    radius: radiusUnits,
+    radiusKm: RADIUS_KM[testCase.key],
+    bodyAxesKm: AXES_KM[testCase.key],
+    brunetonParams,
+    tier: testCase.tier,
+    hasLuts: !!testCase.se,
+    lutsMieG: testCase.se ? LUTS_MIE_G : undefined,
+    transmittanceLut: testCase.se ? {} : undefined,
+    inscatterLut: testCase.se ? {} : undefined,
+    opticalDepthTable: testCase.od
+      ? { sampleCoeff: { x: 0.5, y: 0.25 }, encodedMax: 7 } : null,
+    multipleScatterTable: testCase.ms ? { encodeScale: 3 } : null,
+    opticalDepthTexture: testCase.od ? {} : undefined,
+    multipleScatterTexture: testCase.ms ? {} : undefined,
+    useHalfFloat: testCase.webgl2 !== false
+  });
+  return { name: testCase.name, production, tsl: tslShape(testCase.key, der) };
+}
+
+const CASES = [
+  // Every body in the atmosphere database, default (analytic) path.
+  ...Object.keys(RADIUS_KM).map((key) => ({ name: key + "-analytic", key })),
+  // Bruneton SE path (opt-in tables), incl. venus gain/tint special cases.
+  { name: "earth-se", key: "earth", se: true },
+  { name: "venus-se-low", key: "venus", se: true, tier: "low" },
+  // Analytic table paths: half-float (WebGL2) and packed (WebGL1).
+  { name: "jupiter-tables", key: "jupiter", od: true, ms: true },
+  { name: "mars-tables-webgl1-medium", key: "mars", od: true, ms: true, webgl2: false, tier: "medium" },
+  { name: "saturn-ms-only-low", key: "saturn", ms: true, tier: "low" },
+  // Guards: both factories must refuse.
+  { name: "guard-thin", key: "thin", radiusUnits: 10,
+    profile: { intensity: 1, derived: { opticalDepth: 0 } } },
+  { name: "guard-radius", key: "earth", radiusUnits: 0 },
+  { name: "guard-noprofile", key: "ghost", profile: undefined }
+];
+
+const results = CASES.map(runCase);
+window.__p5atmshellfactory = { ready: true, cases: results };
+note("cases complete: " + results.length);
+</script>
+</body>
+</html>

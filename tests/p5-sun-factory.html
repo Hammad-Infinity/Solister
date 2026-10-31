@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e2 — sun factory GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e2 sun factory starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD
+} from "../src/render/log-depth-glsl.js";
+import { createSunPhotosphere, createSunCorona, createSunHalo } from "../src/bodies/sun-factory.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  SphereGeometry as NodeSphereGeometry,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  BackSide as NodeBackSide,
+  CustomBlending as NodeCustomBlending,
+  OneFactor as NodeOneFactor,
+  OneMinusSrcAlphaFactor as NodeOneMinusSrcAlphaFactor,
+  AdditiveBlending as NodeAdditiveBlending,
+  REVISION
+} from "three/webgpu";
+import { float, select, vec4 } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// One parameter set fed to the extracted production shaders and
+// to the TSL factories alike. Units: sun radius 1 at the origin.
+// Corona profile values are production's (app/state.js
+// SUN_CORONA_*): shell 2.2, intensity 0.62, power 4.3,
+// streamers 0.1, streamer scale 4.2. Measured on this rig at
+// production parameters, the corona's contribution at 6 radii
+// rounds to black in 8 bits on BOTH implementations (the glow
+// column is fed ray distances from the camera, so it shrinks
+// fast with range), so the arithmetic cases move the camera
+// close and raise the intensity uniform (the P5c21 pattern --
+// the arithmetic is unchanged, only its inputs); the
+// production-shaped case stays as the equality witness at
+// production values. Cases:
+//   0 photosphere only
+//   1 corona production-shaped (geometry radius == uShellRadius)
+//   2 corona glow arithmetic visible: geometry 1.7 against
+//     uShellRadius 2.2 (edge-fade term 1), camera 2.6,
+//     intensity 3.7, so the column/phase/limb arithmetic is
+//     what is compared
+//   3 case 2 with streamers exaggerated to 0.5 (noise path)
+//   4 corona from inside uShellRadius: camera 2.0 (outside the
+//     1.7 geometry), wide fov -- the ray-start clamp path
+//   5 halo around the photosphere (camera 20, halo 90 px so it
+//     extends well past the 18 px disc)
+//   6 halo behind an occluding sphere (depth behaviour)
+const BASE = {
+  sunRadius: 1.0, shellGeom: 2.2, shellRadius: 2.2,
+  glowColor: [1, 1, 1], limbColor: [1, 1, 1],
+  intensity: 0.62, power: 4.3, distGain: 1.7,
+  streamers: 0.1, streamScale: 4.2, time: 37.5,
+  haloRadius: 90, haloGain: 1.5,
+  occPos: [0.5, 0.15, 10], occR: 1.2,
+  camPos: [0, 0, 6], camTarget: [0, 0, 0], camFov: 38,
+  parts: ["corona"]
+};
+const CASES = [
+  { ...BASE, parts: ["photosphere"], camPos: [0, 0, 4] },
+  { ...BASE, parts: ["photosphere", "corona"] },
+  { ...BASE, parts: ["photosphere", "corona"], shellGeom: 1.7, streamers: 0, intensity: 3.7, camPos: [0, 0, 2.6], camFov: 55 },
+  { ...BASE, parts: ["photosphere", "corona"], shellGeom: 1.7, streamers: 0.5, intensity: 3.7, camPos: [0, 0, 2.6], camFov: 55 },
+  { ...BASE, parts: ["photosphere", "corona"], shellGeom: 1.7, intensity: 1.2, camPos: [0, 0, 2.0], camFov: 70 },
+  { ...BASE, parts: ["photosphere", "halo"], camPos: [0, 0, 20] },
+  { ...BASE, parts: ["photosphere", "halo", "occluder"], camPos: [0, 0, 20] }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5sun = { done: false, error: null };
+
+async function loadProductionShaders() {
+  const [sunText, glowText] = await Promise.all([
+    fetch("../src/bodies/sun-factory.js").then(r => {
+      if (!r.ok) throw new Error("sun-factory.js fetch failed: " + r.status);
+      return r.text();
+    }),
+    fetch("../src/shaders/single-glow.glsl.js").then(r => {
+      if (!r.ok) throw new Error("single-glow.glsl.js fetch failed: " + r.status);
+      return r.text();
+    })
+  ]);
+  const tickChar = String.fromCharCode(96);
+  const literalOf = (text, marker, from = 0) => {
+    const at = text.indexOf(marker, from);
+    const tick = text.indexOf(tickChar, at);
+    const end = text.indexOf(tickChar, tick + 1);
+    if (at < 0 || tick < 0 || end < 0) throw new Error("literal bounds not found: " + marker);
+    return text.slice(tick, end + 1);
+  };
+  const singleGlow = Function("return " + literalOf(glowText, "const SINGLE_GLOW_COLUMN_GLSL = "))();
+  if (!singleGlow.includes("singleGlowColumn")) throw new Error("extracted glow GLSL is wrong");
+  const ev = (lit, extra = {}) => Function(
+    "LDB_VERTEX_PARS", "LDB_VERTEX_TAIL", "LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD",
+    "SINGLE_GLOW_COLUMN_GLSL", "return " + lit
+  )(LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD, singleGlow, extra);
+  const coronaAt = sunText.indexOf("function createSunCorona");
+  if (coronaAt < 0) throw new Error("createSunCorona not found");
+  const shaders = {
+    photosphereVertex: ev(literalOf(sunText, "const SUN_PHOTOSPHERE_VERTEX = ")),
+    photosphereFragment: ev(literalOf(sunText, "const SUN_PHOTOSPHERE_FRAGMENT = ")),
+    coronaVertex: ev(literalOf(sunText, "vertexShader: ", coronaAt)),
+    coronaFragment: ev(literalOf(sunText, "fragmentShader: ", coronaAt)),
+    haloVertex: ev(literalOf(sunText, "const SUN_HALO_VERTEX = ")),
+    haloFragment: ev(literalOf(sunText, "const SUN_HALO_FRAGMENT = "))
+  };
+  if (!shaders.coronaFragment.includes("singleGlowColumn") ||
+      !shaders.coronaFragment.includes("fbm3") ||
+      !shaders.haloVertex.includes("uHaloRadius") ||
+      !shaders.photosphereFragment.includes("gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);")) {
+    throw new Error("extracted sun shaders do not look like production");
+  }
+  return shaders;
+}
+
+function buildGlslScene(shaders) {
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(cfg.camFov, 1, 0.02, 2000);
+  camera.position.set(...cfg.camPos);
+  camera.lookAt(...cfg.camTarget);
+  scene.add(camera);
+  const v3 = a => new THREE.Vector3(a[0], a[1], a[2]);
+  if (cfg.parts.includes("photosphere")) {
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: shaders.photosphereVertex,
+      fragmentShader: shaders.photosphereFragment,
+      toneMapped: false
+    });
+    scene.add(new THREE.Mesh(new THREE.SphereGeometry(cfg.sunRadius, 128, 128), mat));
+  }
+  if (cfg.parts.includes("corona")) {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        glowColor: { value: new THREE.Color(...cfg.glowColor) },
+        limbColor: { value: new THREE.Color(...cfg.limbColor) },
+        intensity: { value: cfg.intensity },
+        uSunCenter: { value: new THREE.Vector3(0, 0, 0) },
+        uSunRadius: { value: cfg.sunRadius },
+        uShellRadius: { value: cfg.shellRadius },
+        uPower: { value: cfg.power },
+        uDistGain: { value: cfg.distGain },
+        uStreamers: { value: cfg.streamers },
+        uStreamScale: { value: cfg.streamScale },
+        uTime: { value: cfg.time }
+      },
+      vertexShader: shaders.coronaVertex,
+      fragmentShader: shaders.coronaFragment,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.BackSide,
+      blending: THREE.NormalBlending,
+      premultipliedAlpha: true
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(cfg.shellGeom, 128, 128), mat);
+    mesh.renderOrder = 3;
+    scene.add(mesh);
+  }
+  if (cfg.parts.includes("halo")) {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uSunCenter: { value: new THREE.Vector3(0, 0, 0) },
+        uHaloRadius: { value: cfg.haloRadius },
+        uViewport: { value: new THREE.Vector2(size, size) },
+        uGain: { value: cfg.haloGain }
+      },
+      vertexShader: shaders.haloVertex,
+      fragmentShader: shaders.haloFragment,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 4;
+    scene.add(mesh);
+  }
+  if (cfg.parts.includes("occluder")) {
+    // Numeric colour = working-space values, matching the raw
+    // vec4 on the TSL side (a hex colour would be sRGB-decoded).
+    const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.2235, 0.2627, 0.3529) });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(cfg.occR, 48, 32), mat);
+    mesh.position.set(...cfg.occPos);
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+const member = (node, name) => typeof node.get === "function" ? node.get(name) : node[name];
+
+function buildTslScene() {
+  const scene = new NodeScene();
+  const camera = new NodePerspectiveCamera(cfg.camFov, 1, 0.02, 2000);
+  camera.position.set(...cfg.camPos);
+  camera.lookAt(...cfg.camTarget);
+  scene.add(camera);
+  if (cfg.parts.includes("photosphere")) {
+    const material = new MeshBasicNodeMaterial({ name: "P5e2 sun photosphere TSL" });
+    material.toneMapped = false;
+    material.colorNode = createSunPhotosphere().colorNode;
+    scene.add(new NodeMesh(new NodeSphereGeometry(cfg.sunRadius, 128, 128), material));
+  }
+  if (cfg.parts.includes("corona")) {
+    const corona = createSunCorona({
+      glowColor: cfg.glowColor,
+      limbColor: cfg.limbColor,
+      intensity: cfg.intensity,
+      sunCenter: [0, 0, 0],
+      sunRadius: cfg.sunRadius,
+      shellRadius: cfg.shellRadius,
+      power: cfg.power,
+      distGain: cfg.distGain,
+      streamers: cfg.streamers,
+      streamScale: cfg.streamScale,
+      time: cfg.time
+    });
+    const out = corona.sunCoronaColorNode();
+    const color = member(out, "color");
+    const keep = member(out, "keep");
+    const material = new MeshBasicNodeMaterial({ name: "P5e2 sun corona TSL" });
+    material.transparent = true;
+    material.depthWrite = false;
+    material.side = NodeBackSide;
+    // Production's classic state is NormalBlending with
+    // premultipliedAlpha:true: the shader writes raw
+    // (radiance, glare) and the blend factors are
+    // (One, OneMinusSrcAlpha). Node materials give the flag
+    // the opposite division of labour: premultipliedAlpha:true
+    // makes the output stage multiply rgb by alpha in the
+    // shader (setupPremultipliedAlpha) -- measured here as
+    // exactly radiance*glare (51 -> 29 at the frame corner,
+    // 86 -> 85 nearer the limb, both matching the glare
+    // smoothstep). Reproducing production therefore needs the
+    // flag OFF (raw output) with the classic factors stated
+    // explicitly as custom blending.
+    material.blending = NodeCustomBlending;
+    material.blendSrc = NodeOneFactor;
+    material.blendDst = NodeOneMinusSrcAlphaFactor;
+    material.blendSrcAlpha = NodeOneFactor;
+    material.blendDstAlpha = NodeOneMinusSrcAlphaFactor;
+    material.premultipliedAlpha = false;
+    material.colorNode = select(keep.greaterThan(0.5), color, vec4(0.0, 0.0, 0.0, 0.0));
+    const mesh = new NodeMesh(new NodeSphereGeometry(cfg.shellGeom, 128, 128), material);
+    mesh.renderOrder = 3;
+    scene.add(mesh);
+  }
+  if (cfg.parts.includes("halo")) {
+    const halo = createSunHalo({
+      sunCenter: [0, 0, 0],
+      haloRadius: cfg.haloRadius,
+      viewport: [size, size],
+      gain: cfg.haloGain
+    });
+    const material = new MeshBasicNodeMaterial({ name: "P5e2 sun halo TSL" });
+    material.transparent = true;
+    material.depthWrite = false;
+    material.depthTest = true;
+    material.blending = NodeAdditiveBlending;
+    material.toneMapped = false;
+    material.vertexNode = halo.vertexNode;
+    material.colorNode = halo.colorNode;
+    if (halo.depthNode) material.depthNode = halo.depthNode;
+    const mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 4;
+    scene.add(mesh);
+  }
+  if (cfg.parts.includes("occluder")) {
+    const material = new MeshBasicNodeMaterial({ name: "P5e2 occluder TSL" });
+    material.colorNode = vec4(0.2235, 0.2627, 0.3529, 1.0);
+    const mesh = new NodeMesh(new NodeSphereGeometry(cfg.occR, 48, 32), material);
+    mesh.position.set(...cfg.occPos);
+    scene.add(mesh);
+  }
+  return { scene, camera };
+}
+
+try {
+  const shaders = impl === "glsl" ? await loadProductionShaders() : null;
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    // The seam's legacy path always uses production's primary
+    // configuration (MSAA on, log depth on); the node path must
+    // ask for the same sampling or every silhouette differs by
+    // coverage fractions (measured: edge pixels 64/128/192 vs
+    // hard 0/255). Earlier rigs passed antialias:false and got
+    // away with it only where silhouettes were alpha-faded.
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(shaders) : buildTslScene();
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5sun = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    parts: cfg.parts,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e2 sun factory ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5sun = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e2 sun factory error: " + window.__p5sun.error;
+}
+</script>
+</body>
+</html>

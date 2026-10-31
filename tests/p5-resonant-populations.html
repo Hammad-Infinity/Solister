@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5e7 — resonant-populations materials GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P5e7 resonant-populations starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  LDB_VERTEX_PARS, LDB_VERTEX_TAIL, LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD
+} from "../src/render/log-depth-glsl.js";
+import {
+  PROPAGATION_HEAD, propagationUniforms, setGroupResonance, packElements, makeAttributes, ATTR
+} from "../src/bodies/small-bodies/smallbody-gpu.js";
+import {
+  createResonantSwarmMarkers, createResonantSwarmMarkerGeometry,
+  createResonantSwarmRocks, createResonantSwarmRockGeometry,
+  createResonantCatalogMarkers, createResonantCatalogMarkerGeometry,
+  createResonantCatalogRocks, createResonantCatalogRockGeometry
+} from "../src/bodies/small-bodies/resonant-populations.tsl.js";
+import * as THREE from "three";
+import * as NodeNS from "three/webgpu";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  Color as NodeColor,
+  NormalBlending as NodeNormalBlending,
+  REVISION
+} from "three/webgpu";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+// All four materials of resonant-populations.js (swarm
+// markers + rocks over its own populationPosition solver,
+// catalogue markers + rocks over PROPAGATION_HEAD) against
+// their extracted production assemblies. The swarm is
+// regenerated with production's seeded distributions; the
+// catalogue is a deterministic packed mix (production
+// packElements). As in P5e6, the GLSL catalogue rocks wrap
+// production's deinterleaved arrays as instanced
+// attributes -- the intended per-instance semantics (the
+// shipped assembly defect is recorded in the roadmap);
+// the TSL side uses the factories' interleaved builders.
+// Cases:
+//   0 swarm markers, trojan L4, production pixel regime
+//   1 swarm markers, Hilda branch, uKm x3e7 (discs)
+//   2 swarm rocks, trojan L5, uKm x6e6
+//   3 catalogue markers, 3:2 group resonance, uKm x3e7
+//   4 catalogue rocks, 3:2, uKm x6e6, uDays 0
+const AU = 30;
+const KM = AU / 149597870.7;
+const LAMBDA = 2.3;
+const JUPITER_A = 5.2044 * AU;
+// Swarm lambda is per case: the trojan clusters sit at
+// ecliptic longitude lambda +/- 60 deg, and lambda 2.3
+// puts both outside this camera's frustum; the values
+// below centre each cluster in frame. Catalogue cases
+// keep Jupiter lambda 2.3 (the packed holders' epoch).
+const CASES = [
+  { kind: "swarm-markers", group: "trojanl4", days: 9000, kmScale: 1, lambda: 0.52 },
+  { kind: "swarm-markers", group: "hildas", days: 9000, kmScale: 3e7 },
+  { kind: "swarm-rocks", group: "trojanl5", days: 9000, kmScale: 6e6, lambda: 2.62 },
+  { kind: "catalog-markers", group: "hildas", days: 9000, kmScale: 3e7, resP: 3, resQ: 2 },
+  { kind: "catalog-rocks", group: "hildas", days: 0, kmScale: 6e6, resP: 3, resQ: 2 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const logDepth = params.get("logdepth") !== "0";
+const cfg = CASES[caseIndex];
+
+window.__p5res = { done: false, error: null };
+
+async function loadProduction() {
+  const [resText, beltText] = await Promise.all([
+    fetch("../src/bodies/small-bodies/resonant-populations.js").then(r => {
+      if (!r.ok) throw new Error("resonant-populations.js fetch failed: " + r.status);
+      return r.text();
+    }),
+    fetch("../src/bodies/small-bodies/belt-factory.js").then(r => {
+      if (!r.ok) throw new Error("belt-factory.js fetch failed: " + r.status);
+      return r.text();
+    })
+  ]);
+  const tickChar = String.fromCharCode(96);
+  const evalShaderExpr = (names, values, from, startMarker, endMarker) => {
+    const at = resText.indexOf(startMarker, from);
+    const end = resText.indexOf(endMarker, at);
+    if (at < 0 || end < 0) throw new Error("shader expr bounds not found: " + startMarker);
+    return Function(...names, "return (" + resText.slice(at + startMarker.length, end) + ")")(...values);
+  };
+  const tablesAt = resText.indexOf("export const ROCK_COLOR");
+  const orbitAt = resText.indexOf("const ORBIT = ", tablesAt);
+  if (tablesAt < 0 || orbitAt < 0) throw new Error("population tables not found");
+  const tables = Function(
+    resText.slice(tablesAt, orbitAt).replace(/export /g, "") + "\nreturn { ROCK_COLOR, POPULATIONS };"
+  )();
+  const tick = resText.indexOf(tickChar, orbitAt);
+  const tickEnd = resText.indexOf(tickChar, tick + 1);
+  const ORBIT = Function("return " + resText.slice(tick, tickEnd + 1))();
+  const headAt = resText.indexOf("const HEAD = ", tickEnd);
+  const headEnd = resText.indexOf("\n", headAt);
+  const HEAD = Function("return (" + resText.slice(headAt + "const HEAD = ".length, headEnd - 1) + ")")();
+
+  const rebuildAt = resText.indexOf("rebuild(options = {})");
+  const catalogAt = resText.indexOf("buildCatalogLayers() {", rebuildAt);
+  if (rebuildAt < 0 || catalogAt < 0) throw new Error("build functions not found");
+  const swarmPars = ["HEAD", "ORBIT", "LDB_VERTEX_PARS", "LDB_VERTEX_TAIL"];
+  const swarmVals = [HEAD, ORBIT, LDB_VERTEX_PARS, LDB_VERTEX_TAIL];
+  const fragPars = ["LDB_FRAGMENT_PARS", "LDB_FRAGMENT_HEAD"];
+  const fragVals = [LDB_FRAGMENT_PARS, LDB_FRAGMENT_HEAD];
+  const headPars = ["PROPAGATION_HEAD", "LDB_VERTEX_PARS", "LDB_VERTEX_TAIL"];
+  const headVals = [PROPAGATION_HEAD, LDB_VERTEX_PARS, LDB_VERTEX_TAIL];
+
+  const swarmMarkerVertex = evalShaderExpr(swarmPars, swarmVals, rebuildAt, "vertexShader: ", ",\n                fragmentShader:");
+  const swarmMarkerFragment = evalShaderExpr(fragPars, fragVals, rebuildAt, "fragmentShader: ", ",\n                transparent:");
+  const swarmMid = resText.indexOf("const mat = new T.ShaderMaterial", rebuildAt);
+  const swarmRockVertex = evalShaderExpr(swarmPars, swarmVals, swarmMid, "vertexShader: ", ",\n                fragmentShader:");
+  const swarmRockFragment = evalShaderExpr(fragPars, fragVals, swarmMid, "fragmentShader: ", ",\n                depthTest: true\n            });");
+
+  const catalogMarkerVertex = evalShaderExpr(headPars, headVals, catalogAt, "vertexShader: ", ",\n                fragmentShader:");
+  const catalogMarkerFragment = evalShaderExpr(fragPars, fragVals, catalogAt, "fragmentShader: ", ",\n                transparent:");
+  const catalogMid = resText.indexOf("const rmat = new T.ShaderMaterial", catalogAt);
+  const catalogRockVertex = evalShaderExpr(headPars, headVals, catalogMid, "vertexShader: ", ",\n                fragmentShader:");
+  const catalogRockFragment = evalShaderExpr(fragPars, fragVals, catalogMid, "fragmentShader: ", ",\n                depthTest: true\n            });");
+
+  const rockAt = beltText.indexOf("function createProceduralRockGeometry(");
+  const rockEnd = beltText.indexOf("function addAsteroidMarkers", rockAt);
+  if (rockAt < 0 || rockEnd < 0) throw new Error("rock geometry function not found");
+  const makeRock = Function(
+    beltText.slice(rockAt, rockEnd) + "\nreturn createProceduralRockGeometry;"
+  )();
+  if (!swarmMarkerVertex.includes("populationPosition") ||
+      !swarmMarkerFragment.includes("uFade") ||
+      !swarmRockVertex.includes("sin(s*2.3)") ||
+      !catalogMarkerVertex.includes("propagateSmallBodyG") ||
+      catalogMarkerFragment.includes("uFade") ||
+      !catalogRockVertex.includes("vec3(.88, 1.07, 1.02)")) {
+    throw new Error("extracted resonant-populations shaders do not look like production");
+  }
+  return {
+    swarmMarkerVertex, swarmMarkerFragment, swarmRockVertex, swarmRockFragment,
+    catalogMarkerVertex, catalogMarkerFragment, catalogRockVertex, catalogRockFragment,
+    ...tables, makeRock
+  };
+}
+
+// Production's seeded swarm distributions (same LCG seed
+// and formulae as rebuild()), one group per case.
+function buildSwarmPopulation(kind) {
+  let seed = 83421;
+  const random = () => (seed = Math.imul(seed, 1664525) + 1013904223 >>> 0) / 4294967296;
+  const TAU = Math.PI * 2;
+  const n = 320;
+  const orbits = new Float32Array(n * 4), extra = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    orbits.set([random() * TAU, kind === 0 ? .12 + random() * .16 : .015 + random() * .09,
+      Math.pow(random(), 1.6) * (kind === 0 ? .3 : .42), random() * TAU], i * 4);
+    extra.set([random() * TAU, .08 + random() * .26, random() < .5 ? 0 : 1,
+      .4 + Math.pow(random(), 4) * 18], i * 4);
+  }
+  return { orbits, extra, count: n };
+}
+
+// Deterministic synthetic catalogue (free + tadpole +
+// horseshoe), packed by production's packElements.
+function buildCatalogPopulation() {
+  let seed = 0x9e3779b9;
+  const rnd = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const TAU = Math.PI * 2;
+  const cat = { a: [], e: [], incRad: [], nodeRad: [], nodeDot: [], varpiRad: [], periDot: [], mRad: [], meanMotionDay: [], epochDays: [], radiusKm: [], flags: [] };
+  const holders = [];
+  const push = (fn) => { const j = cat.a.length; fn(j); holders.push(null); return j; };
+  const indices = [];
+  for (let i = 0; i < 120; i++) {
+    indices.push(push((j) => {
+      const a = 3.82 + rnd() * 0.3;
+      cat.a[j] = a;
+      cat.e[j] = 0.05 + rnd() * 0.25;
+      cat.incRad[j] = rnd() * 0.3;
+      cat.nodeRad[j] = rnd() * TAU;
+      cat.nodeDot[j] = (rnd() * 2 - 1) * 2e-6;
+      cat.varpiRad[j] = rnd() * TAU;
+      cat.periDot[j] = (rnd() * 2 - 1) * 3e-6;
+      cat.mRad[j] = rnd() * TAU;
+      cat.meanMotionDay[j] = 0.01720209895 / Math.pow(a, 1.5);
+      cat.epochDays[j] = (rnd() * 2 - 1) * 400;
+      cat.radiusKm[j] = 0.3 + rnd() * 9;
+      cat.flags[j] = 0;
+    }));
+  }
+  const addResonant = (tadpole) => {
+    const j = push((jj) => {
+      cat.a[jj] = 5.2;
+      cat.e[jj] = 0.02 + rnd() * 0.18;
+      cat.incRad[jj] = rnd() * 0.3;
+      cat.nodeRad[jj] = rnd() * TAU;
+      cat.nodeDot[jj] = (rnd() * 2 - 1) * 1e-6;
+      cat.varpiRad[jj] = rnd() * TAU;
+      cat.periDot[jj] = (rnd() * 2 - 1) * 2e-6;
+      cat.mRad[jj] = rnd() * TAU;
+      cat.meanMotionDay[jj] = 0.0014507;
+      cat.epochDays[jj] = (rnd() * 2 - 1) * 300;
+      cat.radiusKm[jj] = 0.5 + rnd() * 9;
+      cat.flags[jj] = 0;
+    });
+    holders[j] = {
+      state: tadpole ? {
+        libration: true, modulus: 0.2 + rnd() * 0.6, halfX0: -1.5 + rnd() * 3,
+        rateX: 0.0011 + rnd() * 0.0008, k: 0.55 + rnd() * 0.4,
+        center: rnd() < 0.5 ? 1.047 : -1.047, sigma0: rnd() * 2 - 1,
+        peri0: rnd() * TAU, lambdaJ0: 2.3, sign: 1,
+        nu: 0.0009 + rnd() * 0.0008, rates: { periDot: (rnd() * 2 - 1) * 2e-5 }
+      } : {
+        libration: false, type: "horseshoe", modulus: 0.85 + rnd() * 0.14,
+        halfX0: rnd() * 4, rateX: 0.0006 + rnd() * 0.0006, omega0: 0.001 + rnd() * 0.001,
+        center: 0, sigma0: rnd() * 2 - 1, peri0: rnd() * TAU, lambdaJ0: 2.3,
+        sign: rnd() < 0.5 ? -1 : 1, nu: 0.0012, rates: { periDot: (rnd() * 2 - 1) * 2e-5 }
+      }
+    };
+    indices.push(j);
+  };
+  for (let i = 0; i < 40; i++) addResonant(true);
+  for (let i = 0; i < 25; i++) addResonant(false);
+
+  const packed = packElements(cat, indices, holders);
+  const n = indices.length;
+  const sizes = new Float32Array(n);
+  for (let k = 0; k < n; k++) sizes[k] = cat.radiusKm[indices[k]];
+  return { packed, count: n, sizes };
+}
+
+function makeCamera(T, isNode) {
+  const camera = new (isNode ? NodePerspectiveCamera : THREE.PerspectiveCamera)(50, 1, 0.1, 5000);
+  camera.position.set(0, 170, 230);
+  camera.lookAt(0, 0, 0);
+  return camera;
+}
+
+function swarmUniforms(T, group) {
+  return {
+    uKind: { value: group.kind },
+    uLambda: { value: cfg.lambda ?? LAMBDA },
+    uJupiterA: { value: JUPITER_A },
+    uDays: { value: cfg.days },
+    uKm: { value: KM * cfg.kmScale },
+    uViewH: { value: size },
+    uTint: { value: new T.Color(group.color) },
+    uRockColor: { value: new T.Vector3(0.36, 0.32, 0.27) },
+    uFade: { value: .55 }
+  };
+}
+
+function buildGlslScene(prod, pops) {
+  const scene = new THREE.Scene();
+  const camera = makeCamera(THREE, false);
+  scene.add(camera);
+  const group = prod.POPULATIONS[cfg.group];
+  if (cfg.kind === "swarm-markers") {
+    const pop = pops.swarm;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pop.count * 3), 3));
+    geo.setAttribute("aOrbit", new THREE.BufferAttribute(pop.orbits, 4));
+    geo.setAttribute("aExtra", new THREE.BufferAttribute(pop.extra, 4));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: swarmUniforms(THREE, group),
+      vertexShader: prod.swarmMarkerVertex,
+      fragmentShader: prod.swarmMarkerFragment,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false
+    });
+    const points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    scene.add(points);
+  } else if (cfg.kind === "swarm-rocks") {
+    const pop = pops.swarm;
+    globalThis.THREE = THREE;
+    const base = prod.makeRock(2);
+    const geo = new THREE.InstancedBufferGeometry();
+    for (const [key, attribute] of Object.entries(base.attributes)) geo.setAttribute(key, attribute);
+    if (base.index) geo.setIndex(base.index);
+    geo.setAttribute("aOrbit", new THREE.InstancedBufferAttribute(pop.orbits, 4));
+    geo.setAttribute("aExtra", new THREE.InstancedBufferAttribute(pop.extra, 4));
+    geo.instanceCount = pop.count;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: swarmUniforms(THREE, group),
+      vertexShader: prod.swarmRockVertex,
+      fragmentShader: prod.swarmRockFragment,
+      depthTest: true
+    });
+    const rocks = new THREE.Mesh(geo, mat);
+    rocks.frustumCulled = false;
+    scene.add(rocks);
+  } else if (cfg.kind === "catalog-markers") {
+    const pop = pops.catalog;
+    const attrs = makeAttributes(THREE, pop.packed, pop.count);
+    const geo = new THREE.BufferGeometry();
+    for (const [key, spec] of Object.entries(ATTR)) geo.setAttribute(spec.name, attrs[key]);
+    geo.setAttribute("aSize", new THREE.BufferAttribute(pop.sizes, 1));
+    geo.setDrawRange(0, pop.count);
+    const uniforms = {
+      ...propagationUniforms(THREE, { au: AU }),
+      uTint: { value: new THREE.Color(group.color) },
+      uKm: { value: KM * cfg.kmScale },
+      uViewH: { value: size }
+    };
+    setGroupResonance(uniforms, cfg.resP, cfg.resQ);
+    uniforms.uDays.value = cfg.days;
+    uniforms.uJupLambda.value = LAMBDA;
+    const mat = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: prod.catalogMarkerVertex,
+      fragmentShader: prod.catalogMarkerFragment,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false
+    });
+    const points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    scene.add(points);
+  } else {
+    const pop = pops.catalog;
+    globalThis.THREE = THREE;
+    const base = prod.makeRock(2);
+    const geo = new THREE.InstancedBufferGeometry();
+    for (const [key, attribute] of Object.entries(base.attributes)) geo.setAttribute(key, attribute);
+    if (base.index) geo.setIndex(base.index);
+    const attrs = makeAttributes(THREE, pop.packed, pop.count);
+    // Same wrap as the P5e6 rig: production's catalogue
+    // rocks repeat the per-vertex-attributes-on-instanced
+    // assembly defect; the reference implements the
+    // intended per-instance semantics.
+    for (const [key, spec] of Object.entries(ATTR)) {
+      geo.setAttribute(spec.name,
+        new THREE.InstancedBufferAttribute(attrs[key].array, attrs[key].itemSize));
+    }
+    geo.setAttribute("aSize", new THREE.InstancedBufferAttribute(pop.sizes, 1));
+    geo.instanceCount = pop.count;
+    const uniforms = {
+      ...propagationUniforms(THREE, { au: AU }),
+      uRockColor: { value: new THREE.Vector3(...prod.ROCK_COLOR) },
+      uKm: { value: KM * cfg.kmScale }
+    };
+    setGroupResonance(uniforms, cfg.resP, cfg.resQ);
+    uniforms.uDays.value = cfg.days;
+    uniforms.uJupLambda.value = LAMBDA;
+    const mat = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: prod.catalogRockVertex,
+      fragmentShader: prod.catalogRockFragment,
+      depthTest: true
+    });
+    const rocks = new THREE.Mesh(geo, mat);
+    rocks.frustumCulled = false;
+    scene.add(rocks);
+  }
+  return { scene, camera };
+}
+
+function buildTslScene(prod, pops) {
+  const scene = new NodeScene();
+  const camera = makeCamera(null, true);
+  scene.add(camera);
+  const group = prod.POPULATIONS[cfg.group];
+  const swarm = { kind: group.kind, lambda: cfg.lambda ?? LAMBDA, jupiterA: JUPITER_A, days: cfg.days };
+  const prodUniforms = propagationUniforms(NodeNS, { au: AU });
+  const propagation = {
+    days: cfg.days,
+    au: AU,
+    resP: cfg.resP || 1,
+    resQ: cfg.resQ || 1,
+    jupLambda: LAMBDA,
+    jupRate: prodUniforms.uJupRate.value,
+    harmSize: [prodUniforms.uHarmSize.value.x, prodUniforms.uHarmSize.value.y],
+    harmTexture: prodUniforms.uHarm.value
+  };
+  const addMesh = (slots, geometry, name, markers) => {
+    const material = new MeshBasicNodeMaterial({ name });
+    if (markers) {
+      material.transparent = true;
+      material.depthWrite = false;
+      material.blending = NodeNormalBlending;
+    }
+    material.depthTest = true;
+    material.vertexNode = slots.vertexNode;
+    material.colorNode = slots.colorNode;
+    if (slots.depthNode) material.depthNode = slots.depthNode;
+    const mesh = new NodeMesh(geometry, material);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+  };
+  if (cfg.kind === "swarm-markers") {
+    addMesh(createResonantSwarmMarkers({
+      logDepth, swarm,
+      km: KM * cfg.kmScale, viewH: size, viewport: [size, size],
+      tint: new NodeColor(group.color)
+    }), createResonantSwarmMarkerGeometry(NodeNS, pops.swarm), "P5e7 swarm markers TSL", true);
+  } else if (cfg.kind === "swarm-rocks") {
+    globalThis.THREE = NodeNS;
+    const base = prod.makeRock(2);
+    addMesh(createResonantSwarmRocks({
+      logDepth, swarm,
+      km: KM * cfg.kmScale, rockColor: prod.ROCK_COLOR
+    }), createResonantSwarmRockGeometry(NodeNS, base, pops.swarm), "P5e7 swarm rocks TSL", false);
+  } else if (cfg.kind === "catalog-markers") {
+    addMesh(createResonantCatalogMarkers({
+      logDepth, propagation,
+      km: KM * cfg.kmScale, viewH: size, viewport: [size, size],
+      tint: new NodeColor(group.color)
+    }), createResonantCatalogMarkerGeometry(NodeNS, pops.catalog), "P5e7 catalog markers TSL", true);
+  } else {
+    globalThis.THREE = NodeNS;
+    const base = prod.makeRock(2);
+    addMesh(createResonantCatalogRocks({
+      logDepth, propagation,
+      km: KM * cfg.kmScale, rockColor: prod.ROCK_COLOR
+    }), createResonantCatalogRockGeometry(NodeNS, base, pops.catalog), "P5e7 catalog rocks TSL", false);
+  }
+  return { scene, camera };
+}
+
+try {
+  const prod = await loadProduction();
+  const group = prod.POPULATIONS[cfg.group];
+  const pops = {
+    swarm: buildSwarmPopulation(group.kind),
+    catalog: buildCatalogPopulation()
+  };
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    antialias: true,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: true
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+  renderer.setClearColor(impl === "tsl" ? new NodeColor(0, 0, 0) : new THREE.Color(0, 0, 0), 1);
+
+  const { scene, camera } = impl === "glsl" ? buildGlslScene(prod, pops) : buildTslScene(prod, pops);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5res = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    kind: cfg.kind,
+    bodies: cfg.kind.startsWith("swarm") ? pops.swarm.count : pops.catalog.count,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererLogDepth: renderer.logarithmicDepthBuffer ?? renderer.capabilities?.logarithmicDepthBuffer ?? null,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5e7 resonant-populations ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5res = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5e7 resonant-populations error: " + window.__p5res.error;
+}
+</script>
+</body>
+</html>

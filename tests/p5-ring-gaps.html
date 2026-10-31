@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c16 — Saturn ring gaps GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 72px; top: 8px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="64" height="1024"></canvas>
+<div id="status">P5c16 Saturn ring gaps starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { createRingGaps, SATURN_RING_GAPS } from "../src/bodies/planet-factory.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const W = 64, H = 1024;
+const canvas = document.getElementById("c");
+// Case 0 is production itself: the GLSL side gets the constants
+// extracted from planet-factory.js and the TSL side gets no options
+// (exported defaults), so the defaults are under test too. The rest
+// stress the arithmetic: wide smoothstep ramps at full depth,
+// overlapping bands through the max(), and bands flush with the
+// radial domain edges.
+const CASES = [
+  { saturn: true },
+  { cassini: [0.10, 0.30], encke: [0.55, 0.90], depth: 1.0, soft: 0.05 },
+  { cassini: [0.30, 0.70], encke: [0.50, 0.95], depth: 0.5, soft: 0.02 },
+  { cassini: [0.0, 0.15], encke: [0.85, 1.0], depth: 0.92, soft: 0.012 }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5ringgaps = { done: false, error: null };
+
+async function loadProductionParts() {
+  // Extract the exact gap constants and the exact injected patch
+  // block from planet-factory.js, so the GLSL reference cannot
+  // drift from production.
+  const text = await fetch("../src/bodies/planet-factory.js").then(r => {
+    if (!r.ok) throw new Error("planet-factory.js fetch failed: " + r.status);
+    return r.text();
+  });
+  const num = "[-+]?(?:\\d+\\.?\\d*|\\.\\d+)";
+  const pair = (name) => {
+    const m = text.match(new RegExp(name + "\\s*=\\s*\\[\\s*(" + num + ")\\s*,\\s*(" + num + ")\\s*\\]"));
+    if (!m) throw new Error(name + " not found");
+    return [Number(m[1]), Number(m[2])];
+  };
+  const single = (name) => {
+    const m = text.match(new RegExp(name + "\\s*=\\s*(" + num + ")"));
+    if (!m) throw new Error(name + " not found");
+    return Number(m[1]);
+  };
+  const constants = {
+    cassini: pair("RING_GAP_CASSINI"),
+    encke: pair("RING_GAP_ENCKE"),
+    depth: single("RING_GAP_DEPTH"),
+    soft: single("RING_GAP_SOFT")
+  };
+  const tickChar = String.fromCharCode(96);
+  const replaceAt = text.indexOf('.replace("#include <alphamap_fragment>"');
+  if (replaceAt < 0) throw new Error("ring-gap patch site not found");
+  const tick = text.indexOf(tickChar, replaceAt);
+  const end = text.indexOf(tickChar, tick + 1);
+  if (tick < 0 || end < 0) throw new Error("patch literal bounds not found");
+  const block = Function("return " + text.slice(tick, end + 1))();
+  for (const token of ["vMapUv.y", "uCassini", "uEncke", "uGapDepth", "uGapSoft", "diffuseColor.a *="]) {
+    if (!block.includes(token)) throw new Error("extracted block is not the ring-gap patch (missing " + token + ")");
+  }
+  return { constants, block };
+}
+
+function caseValues(parts) {
+  return cfg.saturn ? parts.constants : cfg;
+}
+
+function makeGlslMaterial(parts) {
+  const v = caseValues(parts);
+  return new THREE.ShaderMaterial({
+    name: "P5c16 Saturn ring gaps GLSL reference",
+    uniforms: {
+      uCassini: { value: new THREE.Vector2(v.cassini[0], v.cassini[1]) },
+      uEncke: { value: new THREE.Vector2(v.encke[0], v.encke[1]) },
+      uGapDepth: { value: v.depth },
+      uGapSoft: { value: v.soft }
+    },
+    vertexShader: `
+      varying vec2 vMapUv;
+      void main() {
+        vMapUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec2 vMapUv;
+      uniform vec2  uCassini;
+      uniform vec2  uEncke;
+      uniform float uGapDepth;
+      uniform float uGapSoft;
+      void main() {
+        vec4 diffuseColor = vec4(1.0);
+        ${parts.block}
+        gl_FragColor = vec4(vec3(diffuseColor.a * 0.9), 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial(parts) {
+  const material = new MeshBasicNodeMaterial({ name: "P5c16 Saturn ring gaps TSL" });
+  const { gapFactor } = createRingGaps(cfg.saturn ? {} : {
+    cassini: cfg.cassini, encke: cfg.encke, depth: cfg.depth, soft: cfg.soft
+  });
+  material.colorNode = vec4(vec3(gapFactor.mul(0.9)), float(1.0));
+  return material;
+}
+
+try {
+  const parts = await loadProductionParts();
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 10);
+    camera.position.z = 3;
+    material = makeGlslMaterial(parts);
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 10);
+    camera.position.z = 3;
+    material = makeTslMaterial(parts);
+    mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  const v = caseValues(parts);
+  window.__p5ringgaps = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    width: W,
+    height: H,
+    caseShape: { cassini: v.cassini, encke: v.encke, depth: v.depth, soft: v.soft },
+    constants: {
+      production: parts.constants,
+      tsl: {
+        cassini: [...SATURN_RING_GAPS.cassini],
+        encke: [...SATURN_RING_GAPS.encke],
+        depth: SATURN_RING_GAPS.depth,
+        soft: SATURN_RING_GAPS.soft
+      }
+    },
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c16 Saturn ring gaps ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5ringgaps = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c16 Saturn ring gaps error: " + window.__p5ringgaps.error;
+}
+</script>
+</body>
+</html>

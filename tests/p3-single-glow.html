@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P3 — single glow GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script src="../src/shaders/single-glow.glsl.js"></script>
+<script>
+  globalThis.__SINGLE_GLOW_GLSL = SINGLE_GLOW_COLUMN_GLSL;
+</script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P3 single-glow starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { singleGlow, singleGlowColumn } from "../src/shaders/single-glow.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  OrthographicCamera as NodeOrthographicCamera,
+  PlaneGeometry as NodePlaneGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { uv, vec4, float, mix, pow } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const size = Math.max(64, Math.min(512, Number(params.get("size") || 256) | 0));
+const canvas = document.getElementById("c");
+
+window.__p3 = { done: false, error: null };
+
+function makeGlslMaterial() {
+  const glsl = globalThis.__SINGLE_GLOW_GLSL;
+  if (!glsl) throw new Error("SINGLE_GLOW_COLUMN_GLSL was not loaded");
+  return new THREE.ShaderMaterial({
+    name: "P3 single-glow GLSL reference",
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      precision highp float;
+      varying vec2 vUv;
+      ${glsl}
+      void main() {
+        float b = mix(0.03, 2.5, pow(vUv.x, 1.5));
+        float p = mix(3.0, 6.0, vUv.y);
+        float col = singleGlowColumn(b, -2.25, 2.25, p);
+        float symmetric = singleGlow(b, -2.25, 2.25, p, 2.2, 1.0);
+        float asymmetric = singleGlow(b, -0.25, 1.75, p, 1.6, 2.0);
+        gl_FragColor = vec4(col / (1.0 + col), symmetric, asymmetric, 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P3 single-glow TSL" });
+  const pUv = uv();
+  const b = mix(float(0.03), float(2.5), pow(pUv.x, float(1.5)));
+  const p = mix(float(3.0), float(6.0), pUv.y);
+  const col = singleGlowColumn(b, float(-2.25), float(2.25), p);
+  const symmetric = singleGlow(b, float(-2.25), float(2.25), p, float(2.2), float(1.0));
+  const asymmetric = singleGlow(b, float(-0.25), float(1.75), p, float(1.6), float(2.0));
+  material.colorNode = vec4(col.div(col.add(1.0)), symmetric, asymmetric, float(1.0));
+  return material;
+}
+
+try {
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeGlslMaterial();
+    mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodeOrthographicCamera(-1, 1, 1, -1, 0, 2);
+    camera.position.z = 1;
+    material = makeTslMaterial();
+    mesh = new NodeMesh(new NodePlaneGeometry(2, 2), material);
+  }
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p3 = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P3 single-glow ${impl}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p3 = { done: true, error: String(e?.stack || e), revision: REVISION, impl };
+  status.textContent = "P3 single-glow error: " + window.__p3.error;
+}
+</script>
+</body>
+</html>

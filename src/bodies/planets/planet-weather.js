@@ -335,7 +335,7 @@ function pulseEnvelope(age, duration, pulses) {
 }
 
 export class PlanetWeather {
-    constructor({THREE: THREE, objectRegistry: objectRegistry, camera: camera, renderer: renderer, getLightningEnabled: getLightningEnabled, getAtmosphereProfile: getAtmosphereProfile, getRadiusKm: getRadiusKm, getEarthCloudTexture: getEarthCloudTexture, getEarthCloudOpacity: getEarthCloudOpacity, getEarthCloudGlowMaterial: getEarthCloudGlowMaterial, getSurfaceHeightKm: getSurfaceHeightKm}) {
+    constructor({THREE: THREE, objectRegistry: objectRegistry, camera: camera, renderer: renderer, getLightningEnabled: getLightningEnabled, getAtmosphereProfile: getAtmosphereProfile, getRadiusKm: getRadiusKm, getEarthCloudTexture: getEarthCloudTexture, getEarthCloudOpacity: getEarthCloudOpacity, getEarthCloudGlowMaterial: getEarthCloudGlowMaterial, getEarthWeatherField: getEarthWeatherField, getSurfaceHeightKm: getSurfaceHeightKm}) {
         this.T = THREE;
         this.objectRegistry = objectRegistry;
         this.camera = camera;
@@ -346,6 +346,11 @@ export class PlanetWeather {
         this.getEarthCloudTexture = getEarthCloudTexture;
         this.getEarthCloudOpacity = getEarthCloudOpacity;
         this.getEarthCloudGlowMaterial = getEarthCloudGlowMaterial;
+        // The weather system's field: the storm population and the flash map the
+        // strike regions are binned from. Injected like every other dependency
+        // here, because a module-scoped const in another script file is not a
+        // property of the global object and cannot be reached through it.
+        this.getEarthWeatherField = getEarthWeatherField;
         this.getSurfaceHeightKm = getSurfaceHeightKm;
         this.cloudTextureCache = null;
         this.cloudPixels = null;
@@ -420,11 +425,7 @@ export class PlanetWeather {
             const latitude = Math.max(-78, Math.min(78, region.lat + Math.sin(angle) * distance));
             const longitude = ((region.lon + Math.cos(angle) * distance / Math.max(.25, Math.cos(latitude * Math.PI / 180)) + 180) % 360 + 360) % 360 - 180;
             const normal = unitFromEarthLatLon(this.T, latitude, longitude);
-            // Sample storm locations over the full globe; the Earth/cloud shells
-            // depth-occlude the far hemisphere naturally.
             const cloudDensity = this.sampleEarthCloudDensity(normal);
-            // KTX2 maps are often GPU-only. In that case the fragment shader performs
-            // the final exact cloud-mask gate before either lightning ribbon is drawn.
             if (cloudDensity !== null && cloudDensity < .38) continue;
             const score = Math.pow(cloudDensity ?? .55, 2.2) + random() * .02 - distance / radiusDeg * .03;
             if (score > bestScore) {
@@ -439,6 +440,78 @@ export class PlanetWeather {
         }
         return best;
     }
+    // Visible bolts per second on Earth: the weather system's flash rate times
+    // the share of flashes that reach the ground.
+    earthBoltRate(fallback) {
+        const CG_FRACTION = 0.78 / 10 + 0.22 / 4;
+        const flashes = this.getEarthWeatherField?.()?.stats?.flashPerSecond;
+        return Number.isFinite(flashes) ? flashes * CG_FRACTION : fallback;
+    }
+    // Replace an Earth entry's regions with ones taken from the weather system,
+    // now that it exists. The entry is created on the first frame that draws the
+    // planet, which can be before the cloud deck has finished building; when
+    // that happens the entry starts on the fallback hotspots and is upgraded
+    // here, once, as soon as the flash map is available.
+    refreshEarthStrikeRegions(entry) {
+        if (!entry || entry.key !== "earth" || entry.regionsFromWeather) return false;
+        const regions = this.buildEarthStrikeRegions(this.T, entry.random);
+        if (!regions) return false;
+        entry.regions = regions;
+        entry.flashEvents = new Array(regions.length).fill(null);
+        entry.flashStrengths = new Float32Array(regions.length);
+        entry.rate = Math.max(1e-4, this.earthBoltRate(entry.rate));
+        entry.regionsFromWeather = true;
+        return true;
+    }
+    // Strike regions for Earth, binned from the weather system's flash map.
+    //
+    // Binned at 1.5 degrees, which is about 165 km: coarse enough that the
+    // planet needs only a few hundred regions (the strike scheduler scans them
+    // per strike), fine enough that a squall line and the cyclone 500 km away
+    // land in different bins. Weight is the bin's flash rate, so a bin over a
+    // violent cluster is struck far more often than one over a stray cell.
+    buildEarthStrikeRegions(T, random) {
+        const field = this.getEarthWeatherField?.();
+        const flash = field?.flashMap;
+        const texture = field?.texture;
+        if (!flash || !texture) return null;
+        const W = texture.image.width, H = texture.image.height;
+        const BIN_DEG = 1.5;
+        const bins = new Map();
+        for (let y = 0; y < H; y++) {
+            const lat = 90 - (y + 0.5) * 180 / H;
+            const rowBase = y * W;
+            for (let x = 0; x < W; x++) {
+                const rate = flash[rowBase + x];
+                if (rate < 1e-6) continue;
+                let u = (x + 0.5) / W - 0.5; u = ((u % 1) + 1) % 1;
+                const lon = u * 360;
+                const key = Math.floor((lat + 90) / BIN_DEG) + ":" + Math.floor((lon + 180) / BIN_DEG);
+                const bin = bins.get(key);
+                if (bin) { bin.rate += rate; bin.wSum += rate * lat; bin.lSum += rate * lon; bin.n++; }
+                else bins.set(key, { rate, wSum: rate * lat, lSum: rate * lon, n: 1 });
+            }
+        }
+        const strongest = [ ...bins.values() ].filter(b => b.rate > 0).sort((a, b) => b.rate - a.rate);
+        // A few hundred regions, or all of them if there are fewer.
+        const LIMIT = 240;
+        const kept = strongest.slice(0, LIMIT);
+        if (!kept.length) return null;
+        const total = kept.reduce((a, b) => a + b.rate, 0);
+        if (!(total > 0)) return null;
+        return kept.map((bin, index) => {
+            const lat = Math.max(-76, Math.min(76, bin.wSum / bin.rate));
+            const lon = bin.lSum / bin.rate;
+            return {
+                lat, lon,
+                normal: unitFromEarthLatLon(T, lat, lon),
+                radiusDeg: BIN_DEG * 1.4,
+                weight: bin.rate / total,
+                nextAllowed: 0,
+                index
+            };
+        });
+    }
     createEntry(key, body, now) {
         const T = this.T;
         const model = LIGHTNING_MODELS[key];
@@ -448,7 +521,24 @@ export class PlanetWeather {
         const baseColor = new T.Color(model.color);
         const gas = deriveGasResponse(layer, T, baseColor);
         const random = seededRandom((model.seed ^ this.sessionSeed) >>> 0);
-        const regions = model.zones.map(([baseLat, baseLon], index) => {
+        // Earth's strike regions come from the weather system where lightning
+        // actually is, not from a list of famous storm spots: the flash map has
+        // already summed every cell, squall line and cyclone on the planet into
+        // flashes per second per texel, so binning it gives strike regions whose
+        // weights *are* the measured distribution. A hard-coded list would put
+        // bolts over the Sahel on a day the Sahel is clear.
+        const dynamicRegions = key === "earth" ? this.buildEarthStrikeRegions(T, random) : null;
+        // How many *visible bolts* per second the planet makes. The weather
+        // system gives the flash rate -- every flash, intracloud and ground,
+        // which is what the satellites count -- and only the ground flashes are
+        // a bolt you can see. The observed ratio is about 3 intracloud for every
+        // ground flash in mid-latitudes and 9:1 in the tropics (NASA), and
+        // about 78 % of all lightning is tropical, so the visible share is
+        // 0.78/10 + 0.22/4 = 0.133. 44 flashes a second therefore mean about
+        // 5.9 bolts a second, which is what this renders.
+        const CG_FRACTION = 0.78 / 10 + 0.22 / 4;
+        const earthBoltRate = this.earthBoltRate(model.rate);
+        const regions = dynamicRegions || model.zones.map(([baseLat, baseLon], index) => {
             const latJitter = (random() - .5) * (key === "earth" ? 8 : 4);
             const lonJitter = (random() - .5) * (key === "earth" ? 14 : 8);
             const lat = Math.max(-76, Math.min(76, baseLat + latJitter));
@@ -503,6 +593,7 @@ export class PlanetWeather {
             radius: radius,
             radiusKm: radiusKm,
             regions: regions,
+            regionsFromWeather: !!dynamicRegions,
             slots: slots,
             flashEvents: new Array(regions.length).fill(null),
             flashStrengths: new Float32Array(regions.length),
@@ -517,7 +608,7 @@ export class PlanetWeather {
                 previous: new T.Vector3
             },
             random: random,
-            rate: Math.max(1e-4, key === "earth" ? model.rate : model.rate * gas.rateFactor),
+            rate: Math.max(1e-4, key === "earth" ? earthBoltRate : model.rate * gas.rateFactor),
             rateFactor: gas.rateFactor,
             gasTint: gas.tint,
             layer: layer,
@@ -736,6 +827,7 @@ export class PlanetWeather {
             this.deactivateEntry(entry, now, .25);
             return;
         }
+        if (isEarth) this.refreshEarthStrikeRegions(entry);
         if (earthCloudTexture) earthCloudTexture.updateMatrix?.();
         body.getWorldPosition(this.bodyPosition);
         body.getWorldScale(entry.scale);

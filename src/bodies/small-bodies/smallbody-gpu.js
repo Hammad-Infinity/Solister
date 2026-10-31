@@ -97,23 +97,18 @@ export function makeAttributes(THREE, packed, count) {
               case "el1":
                 out.set(packed.subarray(src, src + 4), dst);
                 break;
-
               case "el2":
                 out.set(packed.subarray(src + 4, src + 8), dst);
                 break;
-
               case "el3":
                 out.set(packed.subarray(src + 8, src + 12), dst);
                 break;
-
               case "pend1":
                 out.set(packed.subarray(src + 12, src + 16), dst);
                 break;
-
               case "pend2":
                 out.set(packed.subarray(src + 16, src + 20), dst);
                 break;
-
               case "pend3":
                 out.set(packed.subarray(src + 20, src + 24), dst);
                 break;
@@ -160,8 +155,7 @@ export function harmonicTexture(THREE) {
         for (let k = 0; k < W; k++) data[r * W + k] = A[k] || 0;
     }
     const tex = new THREE.DataTexture(data, W, H, THREE.RedFormat ?? THREE.LuminanceFormat, THREE.FloatType ?? THREE.UnsignedByteType);
-    // The shader samples exact texel centers, so nearest filtering is sufficient
-    // and avoids requiring float-linear-filter support on WebGL implementations.
+
     tex.minFilter = THREE.NearestFilter;
     tex.magFilter = THREE.NearestFilter;
     tex.generateMipmaps = false;

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P5c18 — ring shadow receiver GLSL vs TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; }
+  #status { position: fixed; left: 8px; top: 296px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="384" height="288"></canvas>
+<div id="status">P5c18 ring shadow receiver starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import {
+  createRingShadowReceiver,
+  deriveRingShadowReceiverInstall
+} from "../src/shaders/ring-shadow-receiver.tsl.js";
+import * as THREE from "three";
+import {
+  Scene as NodeScene,
+  PerspectiveCamera as NodePerspectiveCamera,
+  SphereGeometry as NodeSphereGeometry,
+  Mesh as NodeMesh,
+  MeshBasicNodeMaterial,
+  LinearSRGBColorSpace as NodeLinearSRGBColorSpace,
+  NoToneMapping as NodeNoToneMapping,
+  REVISION
+} from "three/webgpu";
+import { vec3, vec4, float } from "three/tsl";
+
+const status = document.getElementById("status");
+const params = new URLSearchParams(location.search);
+const impl = params.get("impl") === "glsl" ? "glsl" : "tsl";
+const W = 384, H = 288;
+const canvas = document.getElementById("c");
+// Frame cases: a unit planet disc receiving ring shadow. Saturn-
+// like three world bands under a high sun; ten narrow Uranus-like
+// bands; the single default band with a tilted (unnormalised)
+// ring normal and a near-in-plane sun, so the sign test boundary
+// crosses the disc; and a sun below the ring plane,
+// shadowing the upper disc. The factor renders as grey (x0.9).
+const URANUS_FRACTIONS = [
+  [.016, .024], [.05, .066], [.086, .104], [.308, .324], [.4, .421],
+  [.553, .574], [.603, .624], [.674, .695], [.85, .871], [.966, .987]
+];
+const CASES = [
+  { innerR: 1.11, outerR: 2.33, darkness: 0.5,
+    bands: [[1.11, 1.95], [2.03, 2.27], [2.28, 2.33]],
+    sun: [6, 2.5, 3], normal: [0, 1, 0], cam: [0.4, 1.6, 3.4] },
+  { innerR: 1.63, outerR: 2.01, darkness: 0.6,
+    bands: URANUS_FRACTIONS.map(([a, b]) => [1.63 + a * 0.38, 1.63 + b * 0.38]),
+    sun: [-5, 1.2, 4], normal: [0, 1, 0], cam: [2.8, 1.1, 2.2] },
+  { innerR: 1.25, outerR: 2.2, darkness: 0.85, bands: undefined,
+    sun: [7, 0.35, -2], normal: [0.35, 1, 0.15], cam: [-2.4, 0.9, 3.0] },
+  { innerR: 1.2, outerR: 2.6, darkness: 0.75,
+    bands: [[1.2, 1.8], [1.9, 2.6]],
+    sun: [6, -2.5, 3], normal: [0, 1, 0], cam: [0.4, 1.6, 3.4] }
+];
+const caseIndex = Math.max(0, Math.min(CASES.length - 1, Number(params.get("case") || 0) | 0));
+const cfg = CASES[caseIndex];
+
+window.__p5ringrecv = { done: false, error: null };
+window.THREE = THREE;
+
+async function loadProduction() {
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "../src/shaders/ring-shadow-receiver.glsl.js";
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  if (typeof window.installRingShadowReceiver !== "function" ||
+      typeof window.ringShadowReceiverGlsl !== "function") {
+    throw new Error("production ring shadow receiver did not load");
+  }
+  // RING_SHADOW_MAX_BANDS is a classic-script const (no window
+  // property); the default parameter resolves it in its own scope.
+  const glsl = window.ringShadowReceiverGlsl();
+  if (!glsl.includes("float ringShadowReceiverFactor(") ||
+      !glsl.includes("uRingBands[20]")) {
+    throw new Error("generated GLSL is not the receiver factor");
+  }
+  return { glsl };
+}
+
+// The real installer on a stub mesh: production packing of the
+// very uniforms the GLSL side below renders with.
+function productionInstall(spec) {
+  const mesh = { material: { needsUpdate: false } };
+  return window.installRingShadowReceiver(
+    mesh, spec.innerR, spec.outerR, spec.darkness, spec.bands);
+}
+
+function productionShape(uniforms) {
+  return {
+    inner: uniforms.uRingInner.value,
+    outer: uniforms.uRingOuter.value,
+    shadow: uniforms.uRingShadow.value,
+    bandCount: uniforms.uRingBandCount.value,
+    bands: Array.from(uniforms.uRingBands.value),
+    normal: uniforms.uRingNormal.value.toArray()
+  };
+}
+
+function derivationCases() {
+  const specs = [
+    { name: "saturn-3band", innerR: 1.11, outerR: 2.33, darkness: 0.5,
+      bands: [[1.11, 1.95], [2.03, 2.27], [2.28, 2.33]] },
+    { name: "uranus-10band", innerR: 1.63, outerR: 2.01, darkness: 0.18,
+      bands: URANUS_FRACTIONS.map(([a, b]) => [1.63 + a * 0.38, 1.63 + b * 0.38]) },
+    { name: "over-cap-12band", innerR: 1.0, outerR: 3.0, darkness: 0.3,
+      bands: Array.from({ length: 12 }, (_, i) => [1 + i * 0.15, 1.1 + i * 0.15]) },
+    { name: "empty-bands-default", innerR: 1.4, outerR: 2.4, darkness: 0.5, bands: [] },
+    { name: "omitted-bands-default", innerR: 1.25, outerR: 2.2, darkness: 0.85, bands: undefined }
+  ];
+  return specs.map((spec) => {
+    const production = productionShape(productionInstall(spec));
+    const der = deriveRingShadowReceiverInstall(spec);
+    const tsl = {
+      inner: der.innerR,
+      outer: der.outerR,
+      shadow: der.darkness,
+      bandCount: der.bandCount,
+      bands: Array.from(der.bandArray),
+      normal: der.normal
+    };
+    return { name: spec.name, production, tsl };
+  });
+}
+
+function makeGlslMaterial(parts, uniforms) {
+  return new THREE.ShaderMaterial({
+    name: "P5c18 ring shadow receiver GLSL reference",
+    uniforms: {
+      uRingCenter: { value: new THREE.Vector3(0, 0, 0) },
+      uRingNormal: { value: new THREE.Vector3(...cfg.normal) },
+      uRingInner: uniforms.uRingInner,
+      uRingOuter: uniforms.uRingOuter,
+      uRingShadow: uniforms.uRingShadow,
+      uRingBands: uniforms.uRingBands,
+      uRingBandCount: uniforms.uRingBandCount,
+      uSunPos: { value: new THREE.Vector3(...cfg.sun) }
+    },
+    vertexShader: `
+      varying vec3 vRingShadowWorld;
+      void main() {
+        vRingShadowWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      varying vec3 vRingShadowWorld;
+      ${parts.glsl}
+      void main() {
+        float f = ringShadowReceiverFactor(vRingShadowWorld);
+        gl_FragColor = vec4(vec3(f * 0.9), 1.0);
+      }
+    `
+  });
+}
+
+function makeTslMaterial() {
+  const material = new MeshBasicNodeMaterial({ name: "P5c18 ring shadow receiver TSL" });
+  const { shadowFactor } = createRingShadowReceiver({
+    innerR: cfg.innerR,
+    outerR: cfg.outerR,
+    darkness: cfg.darkness,
+    bands: cfg.bands,
+    center: [0, 0, 0],
+    normal: cfg.normal,
+    sunPos: cfg.sun
+  });
+  material.colorNode = vec4(vec3(shadowFactor.mul(0.9)), float(1.0));
+  return material;
+}
+
+try {
+  const parts = await loadProduction();
+  const derivation = derivationCases();
+  const caseUniforms = productionInstall(cfg);
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: impl === "tsl",
+    search: location.search,
+    requestedBackend: impl === "glsl" ? "webgl" : undefined,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.outputColorSpace = impl === "tsl" ? NodeLinearSRGBColorSpace : THREE.LinearSRGBColorSpace;
+  renderer.toneMapping = impl === "tsl" ? NodeNoToneMapping : THREE.NoToneMapping;
+
+  let scene, camera, mesh, material;
+  if (impl === "glsl") {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 100);
+    material = makeGlslMaterial(parts, caseUniforms);
+    mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 96, 64), material);
+  } else {
+    scene = new NodeScene();
+    camera = new NodePerspectiveCamera(40, W / H, 0.01, 100);
+    material = makeTslMaterial();
+    mesh = new NodeMesh(new NodeSphereGeometry(1, 96, 64), material);
+  }
+  camera.position.set(...cfg.cam);
+  camera.lookAt(0, 0, 0);
+  scene.add(mesh);
+
+  for (let i = 0; i < 5; i++) {
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    renderer.render(scene, camera);
+  }
+
+  window.__p5ringrecv = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    impl,
+    caseIndex,
+    width: W,
+    height: H,
+    caseShape: {
+      darkness: caseUniforms.uRingShadow.value,
+      bandCount: caseUniforms.uRingBandCount.value,
+      cam: cfg.cam
+    },
+    derivation,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    canvasCount: document.querySelectorAll("canvas").length,
+    rendererCtor: renderer.constructor?.name || null,
+    materialType: material.type,
+    drawCalls: renderer.info?.render?.calls ?? null
+  };
+  status.textContent = `P5c18 ring shadow receiver ${impl} case ${caseIndex}: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+  renderer.setAnimationLoop(() => renderer.render(scene, camera));
+} catch (e) {
+  window.__p5ringrecv = { done: true, error: String(e?.stack || e), revision: REVISION, impl, caseIndex };
+  status.textContent = "P5c18 ring shadow receiver error: " + window.__p5ringrecv.error;
+}
+</script>
+</body>
+</html>

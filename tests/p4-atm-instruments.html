@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="../favicon.png">
+<title>Solister P4 — atmosphere instruments for TSL</title>
+<style>
+  html, body { margin: 0; background: #05070c; color: #dfe7ff; font: 13px system-ui, sans-serif; }
+  canvas { display: block; width: 256px; height: 256px; }
+  #status { position: fixed; left: 8px; top: 264px; white-space: pre-wrap; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "../vendor/three-r186/three.module.js",
+    "three/addons/": "../vendor/three-r186/addons/",
+    "three/webgpu": "../vendor/three-r186/three.webgpu.js",
+    "three/tsl": "../vendor/three-r186/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<div id="status">P4 atmosphere instruments starting…</div>
+<script type="module">
+import { createSolisterRenderer } from "../src/app/renderer-runtime.js";
+import { AtmRay, createAtmSampling } from "../src/shaders/atm-sampling.tsl.js";
+import { ATM_HORIZON_EPS, createAtmComposite } from "../src/shaders/planet-atmosphere-composite.tsl.js";
+import * as NodeTHREE from "three/webgpu";
+import {
+  Fn, cameraProjectionMatrix, clipSpace, modelViewMatrix, positionGeometry,
+  dot, float, floor, int, ivec2, max, normalize, pow, select, sin,
+  smoothstep, textureLoad, uniform, uv, vec3, vec4
+} from "three/tsl";
+
+const {
+  BackSide, Color, DataTexture, FloatType,
+  LinearSRGBColorSpace, Matrix3, Matrix4, Mesh, MeshBasicNodeMaterial,
+  NearestFilter, NoBlending, NoToneMapping, OrthographicCamera, PerspectiveCamera,
+  PlaneGeometry, REVISION, RGBAFormat, RenderTarget, Scene, SphereGeometry,
+  Vector3
+} = NodeTHREE;
+
+const status = document.getElementById("status");
+const canvas = document.getElementById("c");
+
+const MAX_CASES = 256;
+const FRAME = 384;
+const SUN_IRRADIANCE = [1.6, 1.434, 1.193];
+const SUN_DIR = new Vector3(0.72, 0.28, 0.55).normalize();
+const BACKGROUND = [0.011, 0.017, 0.029];
+
+// The drawn Earth is an ellipsoid whose equatorial radius is the scene unit.
+// Its table is baked on a 6371 km sphere, so the shader's kilometres per unit
+// are the table radius and the polar axis is stretched by the axis ratio --
+// exactly the relationship installAtmComposite sets up for the real body.
+const POLAR_RATIO = 6356.752 / 6378.137;
+const AXIS_SCALE = [1, 1 / POLAR_RATIO, 1];
+const SEMI_LOCAL = [1, POLAR_RATIO, 1];
+const EYE_DISTANCE = 5.2;
+
+window.__p4c = { done: false, error: null };
+
+function loadClassic(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("failed to load " + src));
+    document.head.appendChild(script);
+  });
+}
+
+try {
+  await loadClassic("../src/render/atmosphere/atm-tables.js");
+
+  const handle = await createSolisterRenderer({
+    canvas,
+    nodeMaterialsReady: true,
+    search: location.search,
+    antialias: false,
+    alpha: false,
+    stencil: false,
+    logarithmicDepthBuffer: false
+  });
+  if (!handle.renderer) throw handle.error || new Error("renderer seam returned no renderer");
+  const renderer = handle.renderer;
+  renderer.setPixelRatio(1);
+  renderer.setSize(256, 256, false);
+  renderer.outputColorSpace = LinearSRGBColorSpace;
+  renderer.toneMapping = NoToneMapping;
+  renderer.setClearColor(new Color(...BACKGROUND), 1);
+
+  const table = await globalThis.loadAtmTable(NodeTHREE, "earth", {
+    url: "../assets/atmosphere/earth.atm.gz"
+  });
+  const header = table.header;
+  const KM_PER_UNIT = header.groundRadiusKm;
+
+  function makeSampling(axisScale) {
+    return createAtmSampling({
+      inscatter: table.s,
+      transmittance: table.t,
+      irradiance: table.e,
+      radii: [
+        header.groundRadiusKm,
+        header.topRadiusKm,
+        header.rayleighScaleHeightKm,
+        header.mieScaleHeightKm
+      ],
+      betaR: header.rayleighBeta,
+      betaMieExt: header.mieExtinctionBeta,
+      mie: [header.mieG, header.mieFade],
+      axisScale,
+      // The CPU mirror has no colour stage, so the instruments compare raw
+      // inscatter with the identity stage, as attescat always has.
+      colAdjust: [0, 1],
+      scatterBright: 1
+    });
+  }
+
+  // Float targets, as in the GLSL instruments: the pixels under test are
+  // linear radiance and signed ray data, and a half float's spacing at a
+  // surface-point magnitude of ~6.37 is already several kilometres --
+  // wider than the tolerance that pass is measured against.
+  function makeTarget(width, height, depthBuffer) {
+    const target = new RenderTarget(width, height, {
+      type: FloatType,
+      format: RGBAFormat,
+      minFilter: NearestFilter,
+      magFilter: NearestFilter,
+      depthBuffer,
+      stencilBuffer: false,
+      samples: 0
+    });
+    target.texture.colorSpace = LinearSRGBColorSpace;
+    target.texture.generateMipmaps = false;
+    return target;
+  }
+
+  // readRenderTargetPixelsAsync hands back the backend's own row order and,
+  // on WebGPU, rows padded to 256 bytes. Normalise both here so the probe
+  // always sees bottom-up rows of plain numbers, the convention attesurf
+  // and attesky were written against.
+  async function readTarget(target) {
+    const width = target.width, height = target.height;
+    const raw = await renderer.readRenderTargetPixelsAsync(target, 0, 0, width, height);
+    const elementBytes = raw.BYTES_PER_ELEMENT || 1;
+    const stride = handle.info.actualBackend === "webgpu"
+      ? Math.ceil(width * elementBytes * 4 / 256) * 256 / elementBytes
+      : width * 4;
+    const out = new Float32Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      const sourceY = handle.info.actualBackend === "webgpu" ? height - 1 - y : y;
+      for (let x = 0; x < width; x++) {
+        for (let c = 0; c < 4; c++) {
+          out[(y * width + x) * 4 + c] = raw[sourceY * stride + x * 4 + c];
+        }
+      }
+    }
+    return Array.from(out);
+  }
+
+  async function renderTo(target, scene, camera) {
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(new Color(...BACKGROUND), 1);
+    renderer.clear(true, true, false);
+    renderer.render(scene, camera);
+    const pixels = await readTarget(target);
+    renderer.setRenderTarget(null);
+    return pixels;
+  }
+
+  // ------------------------------------------------------- the attescat rig
+  // One material, one 256x1 draw per pass, one case per pixel: the same
+  // shape as the GLSL instrument. The case fields travel in float data
+  // textures because a uniform array of 256 vec4s per field does not fit
+  // a WebGPU uniform binding; texel loads keep them exact float32s.
+  function makeCaseTexture() {
+    const data = new Float32Array(MAX_CASES * 4);
+    const texture = new DataTexture(data, MAX_CASES, 1, RGBAFormat, FloatType);
+    texture.minFilter = NearestFilter;
+    texture.magFilter = NearestFilter;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+    return { data, texture };
+  }
+  const caseTextures = {
+    eye: makeCaseTexture(),       // eyePos.xyz, eyeR
+    view: makeCaseTexture(),      // viewDir.xyz, viewLen
+    frag: makeCaseTexture(),      // fragPos.xyz, fragR
+    raster: makeCaseTexture(),    // raster.xyz, fragMu
+    sun: makeCaseTexture(),       // sun.xyz
+    attenuation: makeCaseTexture(), // att.xyz
+    ground: makeCaseTexture()     // ground.xyz
+  };
+  function fillCases(cases) {
+    const put = (slot, i, v, w = 0) => {
+      slot.data[i * 4] = v[0]; slot.data[i * 4 + 1] = v[1];
+      slot.data[i * 4 + 2] = v[2]; slot.data[i * 4 + 3] = w;
+    };
+    for (let i = 0; i < MAX_CASES; i++) {
+      const c = cases[Math.min(i, cases.length - 1)];
+      put(caseTextures.eye, i, c.ray.eyePos, c.ray.eyeR);
+      put(caseTextures.view, i, c.ray.viewDir, c.ray.viewLen);
+      put(caseTextures.frag, i, c.ray.fragPos, c.ray.fragR);
+      put(caseTextures.raster, i, c.raster || c.ray.fragPos, c.ray.fragMu);
+      put(caseTextures.sun, i, c.sun);
+      put(caseTextures.attenuation, i, c.att);
+      put(caseTextures.ground, i, c.ground || [0, 0, 0]);
+    }
+    for (const slot of Object.values(caseTextures)) slot.texture.needsUpdate = true;
+  }
+
+  const scatSampling = makeSampling([1, 1, 1]);
+  const scatComposite = createAtmComposite({
+    sampling: scatSampling,
+    sunIrradiance: SUN_IRRADIANCE
+  });
+  const kindNode = uniform(0);
+  const termOf = (terms, name) => typeof terms.get === "function" ? terms.get(name) : terms[name];
+
+  const scatMaterial = new MeshBasicNodeMaterial({
+    name: "P4 atmosphere instruments TSL",
+    // The fourth channel is data here (the packed Mie term, a radius), not
+    // opacity. An opaque normal-blended node material overwrites it with
+    // 1.0; NoBlending keeps the write a plain store of all four channels.
+    blending: NoBlending,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+    fog: false
+  });
+  // A fragment node, not a colour node: ray cosines and surface-point
+  // coordinates are signed, and the basic material's output path clamps
+  // every channel at zero. The declared return type lets the builder take
+  // this graph as the fragment stage without probing it for its type.
+  scatMaterial.fragmentNode = Fn(() => {
+    const index = int(floor(uv().x.mul(float(MAX_CASES))));
+    const coord = ivec2(index, 0);
+    const eye = textureLoad(caseTextures.eye.texture, coord).toVar();
+    const view = textureLoad(caseTextures.view.texture, coord).toVar();
+    const frag = textureLoad(caseTextures.frag.texture, coord).toVar();
+    const raster = textureLoad(caseTextures.raster.texture, coord).toVar();
+    const sun = textureLoad(caseTextures.sun.texture, coord).xyz.toVar();
+    const attenuationIn = textureLoad(caseTextures.attenuation.texture, coord).xyz.toVar();
+    const ground = textureLoad(caseTextures.ground.texture, coord).xyz.toVar();
+
+    const eyeMu = dot(eye.xyz, view.xyz).div(eye.w).toVar();
+    const ray = AtmRay({
+      eyePos: eye.xyz,
+      eyeR: eye.w,
+      eyeMu,
+      viewDir: view.xyz,
+      viewLen: view.w,
+      fragPos: frag.xyz,
+      fragR: frag.w,
+      fragMu: raster.w
+    });
+    const eyeMuS = dot(eye.xyz, sun).div(eye.w);
+    const nu = dot(view.xyz, sun);
+    const segment = scatSampling.atmTransmittanceSegment(eye.w, eyeMu, frag.w, raster.w);
+    const terms = scatComposite.atmCompositeTerms(frag.xyz, eye.xyz, sun);
+
+    // The kind numbering is attescat's own, so the two instruments' pass
+    // tables line up line for line.
+    let out = vec4(
+      scatSampling.atmInscatterSky(scatSampling.atmSkyRay(eye.xyz, view.xyz), sun), 1.0);
+    out = select(kindNode.lessThan(10.5),
+      vec4(scatSampling.atmInscatterSky(ray, sun), 1.0), out);
+    out = select(kindNode.lessThan(9.5), vec4(termOf(terms, "air"), 1.0), out);
+    out = select(kindNode.lessThan(8.5), vec4(termOf(terms, "attenuation"), 1.0), out);
+    out = select(kindNode.lessThan(7.5),
+      vec4(scatComposite.atmSurfacePoint(raster.xyz, eye.xyz, scatSampling.radii.x).mul(0.001), 1.0), out);
+    out = select(kindNode.lessThan(6.5),
+      vec4(scatComposite.atmCompositeSurface(frag.xyz, eye.xyz, sun, ground), 1.0), out);
+    out = select(kindNode.lessThan(5.5), vec4(segment, 1.0), out);
+    out = select(kindNode.lessThan(4.5),
+      vec4(eyeMu, raster.w, view.w.mul(0.001), frag.w.mul(0.001)), out);
+    out = select(kindNode.lessThan(3.5),
+      vec4(scatSampling.atmInscatterGroundFix(ray, sun, attenuationIn, float(ATM_HORIZON_EPS)), 1.0), out);
+    out = select(kindNode.lessThan(2.5),
+      vec4(scatSampling.atmInscatterGround(ray, sun, attenuationIn), 1.0), out);
+    out = select(kindNode.lessThan(1.5), vec4(segment, 1.0), out);
+    out = select(kindNode.lessThan(0.5),
+      scatSampling.atmTable4D(eye.w, eyeMu, eyeMuS, nu), out);
+    return out;
+  }, "vec4")();
+
+  const scatScene = new Scene();
+  const scatMesh = new Mesh(new PlaneGeometry(2, 2), scatMaterial);
+  scatMesh.frustumCulled = false;
+  scatScene.add(scatMesh);
+  const scatCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 2);
+  scatCamera.position.z = 1;
+  scatCamera.updateMatrixWorld();
+  const scatTarget = makeTarget(MAX_CASES, 1, false);
+
+  window.__p4cRunScat = async (kind, cases) => {
+    if (!Array.isArray(cases) || cases.length < 1 || cases.length > MAX_CASES) {
+      throw new Error(`attescat rig: ${cases?.length} cases`);
+    }
+    fillCases(cases);
+    kindNode.value = kind;
+    const pixels = await renderTo(scatTarget, scatScene, scatCamera);
+    return pixels.slice(0, cases.length * 4);
+  };
+
+  // ------------------------------------------- the attesurf / attesky rigs
+  const sunArray = SUN_DIR.toArray();
+  const sideDir = new Vector3().crossVectors(SUN_DIR, new Vector3(0, 1, 0)).normalize();
+  const phase = 68 * Math.PI / 180;
+  const eyeDir = SUN_DIR.clone().multiplyScalar(Math.cos(phase))
+    .addScaledVector(sideDir, Math.sin(phase)).normalize();
+  const eyePos = eyeDir.clone().multiplyScalar(EYE_DISTANCE);
+  const eyeLocalKm = eyePos.toArray().map(v => v * KM_PER_UNIT);
+
+  function makeCamera(fov, target, up) {
+    const camera = new PerspectiveCamera(fov, 1, EYE_DISTANCE * 1e-4, EYE_DISTANCE * 100);
+    camera.position.copy(eyePos);
+    camera.up.copy(up);
+    camera.updateProjectionMatrix();
+    camera.lookAt(target);
+    camera.updateMatrixWorld(true);
+    return camera;
+  }
+
+  function cameraMetadata(camera) {
+    return {
+      position: camera.position.toArray(),
+      matrixWorld: Array.from(camera.matrixWorld.elements),
+      projInv: Array.from(new Matrix4().copy(camera.projectionMatrix).invert().elements)
+    };
+  }
+
+  const frameMetadata = (camera) => ({
+    width: FRAME,
+    height: FRAME,
+    camera: cameraMetadata(camera),
+    eyeLocalKm,
+    sunDirLocal: sunArray,
+    sunIrradiance: SUN_IRRADIANCE,
+    axisScale: AXIS_SCALE,
+    kmPerUnit: KM_PER_UNIT,
+    semiLocal: SEMI_LOCAL,
+    radiiKm: [header.groundRadiusKm, header.topRadiusKm],
+    background: BACKGROUND
+  });
+
+  const frameTarget = makeTarget(FRAME, FRAME, true);
+  const frameSampling = makeSampling(AXIS_SCALE);
+
+  // A ground radiance with structure, a terminator and a glint, computed
+  // from the drawn ellipsoid's own normal. The probe reads the bare frame
+  // back and predicts the composited one from those pixels, so this
+  // function never has to be mirrored on the CPU.
+  const groundColor = Fn(([localPos]) => {
+    const normal = normalize(vec3(
+      localPos.x,
+      localPos.y.div(float(POLAR_RATIO * POLAR_RATIO)),
+      localPos.z
+    )).toVar();
+    const sun = vec3(...sunArray);
+    const bands = float(0.5).add(sin(normal.y.mul(9.0).add(normal.x.mul(3.1))).mul(0.5)).toVar();
+    const patchRaw = sin(normal.x.mul(12.3).add(normal.y.mul(2.0)))
+      .mul(sin(normal.z.mul(9.7).add(normal.y.mul(4.0)))).mul(0.5).add(0.5);
+    const patch = smoothstep(float(0.15), float(0.85), patchRaw).toVar();
+    const albedo = vec3(
+      float(0.08).add(bands.mul(0.17)),
+      float(0.11).add(patch.mul(0.16)),
+      float(0.16).add(float(1.0).sub(bands).mul(0.18))
+    );
+    const diffuse = max(dot(normal, sun), float(0.0));
+    const toEye = normalize(vec3(...eyePos.toArray()).sub(localPos));
+    const glint = pow(max(dot(normal, normalize(toEye.add(sun))), float(0.0)), float(72.0));
+    return albedo
+      .mul(diffuse.mul(vec3(...SUN_IRRADIANCE)).add(vec3(0.025, 0.025, 0.025)))
+      .add(vec3(...SUN_IRRADIANCE).mul(glint).mul(0.9));
+  });
+
+  const surfaceComposite = createAtmComposite({
+    sampling: frameSampling,
+    sunIrradiance: SUN_IRRADIANCE,
+    eyeLocalKm,
+    sunDirLocal: sunArray,
+    kmPerUnit: KM_PER_UNIT
+  });
+
+  function basicMaterial(name) {
+    return new MeshBasicNodeMaterial({
+      name, transparent: false, depthWrite: true, depthTest: true,
+      toneMapped: false, fog: false
+    });
+  }
+  const bareMaterial = basicMaterial("P4 instruments bare ground TSL");
+  bareMaterial.colorNode = Fn(() => vec4(groundColor(positionGeometry), 1.0))();
+  const surfaceMaterial = basicMaterial("P4 instruments composited ground TSL");
+  surfaceMaterial.colorNode = Fn(() => {
+    const ground = groundColor(positionGeometry).toVar();
+    return surfaceComposite.atmCompositeLocalOutput(positionGeometry, vec4(ground, 1.0));
+  })();
+
+  function ellipsoidGeometry(radius, widthSegments, heightSegments) {
+    const geometry = new SphereGeometry(radius, widthSegments, heightSegments);
+    geometry.scale(1, POLAR_RATIO, 1);
+    return geometry;
+  }
+  const bodyGeometry = ellipsoidGeometry(1, 192, 96);
+
+  // The disc rig: three-quarter phase, framed off-centre so a flipped
+  // read-back cannot hide inside a symmetric mask.
+  const discUp = new Vector3().crossVectors(sideDir, eyeDir).normalize();
+  const discTarget = sideDir.clone().multiplyScalar(0.55).addScaledVector(discUp, 0.24);
+  const discCamera = makeCamera(32, discTarget, discUp);
+  const discScene = new Scene();
+  const discMesh = new Mesh(bodyGeometry, surfaceMaterial);
+  discMesh.frustumCulled = false;
+  discScene.add(discMesh);
+
+  window.__p4cRenderSurface = async () => {
+    discMesh.material = surfaceMaterial;
+    const withAtmosphere = await renderTo(frameTarget, discScene, discCamera);
+    discMesh.material = bareMaterial;
+    const bare = await renderTo(frameTarget, discScene, discCamera);
+    discMesh.material = surfaceMaterial;
+    return { ...frameMetadata(discCamera), withAtmosphere, bare };
+  };
+
+  // The sky rig: the same eye, zoomed onto the lit limb so the 60 km band
+  // is several pixels wide, with the shell the installer would draw.
+  const limbDir = SUN_DIR.clone().addScaledVector(eyeDir, -SUN_DIR.dot(eyeDir)).normalize();
+  const limbTarget = limbDir.clone();
+  const limbForward = limbTarget.clone().sub(eyePos).normalize();
+  const limbUp = limbDir.clone().addScaledVector(limbForward, -limbDir.dot(limbForward)).normalize();
+  const skyCamera = makeCamera(6, limbTarget, limbUp);
+
+  const projection = skyCamera.projectionMatrix.elements;
+  const skyComposite = createAtmComposite({
+    sampling: frameSampling,
+    sunIrradiance: SUN_IRRADIANCE,
+    eyeLocalKm,
+    sunDirLocal: sunArray,
+    kmPerUnit: KM_PER_UNIT,
+    rayScale: [
+      Math.abs(projection[0]) > 1e-12 ? 1 / projection[0] : 0,
+      Math.abs(projection[5]) > 1e-12 ? 1 / projection[5] : 0
+    ],
+    viewToLocal: new Matrix3().setFromMatrix4(skyCamera.matrixWorld)
+  });
+  const skyMaterial = new MeshBasicNodeMaterial({
+    name: "P4 instruments sky TSL",
+    transparent: false, depthWrite: true, depthTest: true,
+    // Only the far side of the shell may draw: it is behind the body on
+    // disc pixels and unobstructed beside them, which is what makes the
+    // depth test the discard. The near side lies in front of the disc
+    // and would overwrite it under any single depth encoding.
+    side: BackSide, toneMapped: false, fog: false
+  });
+  skyMaterial.vertexNode = cameraProjectionMatrix
+    .mul(modelViewMatrix)
+    .mul(vec4(positionGeometry, float(1.0)));
+  skyMaterial.colorNode = Fn(() => skyComposite.atmSkyOutput(clipSpace))();
+
+  const skyScene = new Scene();
+  const skyBodyMesh = new Mesh(bodyGeometry, surfaceMaterial);
+  skyBodyMesh.frustumCulled = false;
+  skyScene.add(skyBodyMesh);
+  const shellMesh = new Mesh(
+    ellipsoidGeometry(header.topRadiusKm / header.groundRadiusKm, 256, 128),
+    skyMaterial
+  );
+  shellMesh.name = "earth air";
+  shellMesh.renderOrder = 1;
+  shellMesh.frustumCulled = false;
+  skyScene.add(shellMesh);
+
+  window.__p4cRenderSky = async () => {
+    shellMesh.visible = true;
+    const withSky = await renderTo(frameTarget, skyScene, skyCamera);
+    shellMesh.visible = false;
+    const withoutSky = await renderTo(frameTarget, skyScene, skyCamera);
+    shellMesh.visible = true;
+    return {
+      ...frameMetadata(skyCamera),
+      withSky,
+      withoutSky,
+      hasSky: true,
+      skyName: shellMesh.name
+    };
+  };
+
+  window.__p4cDebug = {
+    renderer, table, scatScene, scatCamera, scatMesh, scatMaterial,
+    discScene, discCamera, skyScene, skyCamera
+  };
+  window.__p4c = {
+    done: true,
+    error: null,
+    revision: REVISION,
+    info: handle.info,
+    header,
+    sameCanvas: handle.canvas === canvas && renderer.domElement === canvas,
+    rendererCtor: renderer.constructor?.name || null,
+    maxCases: MAX_CASES,
+    frameSize: FRAME
+  };
+  status.textContent =
+    `P4 atmosphere instruments: actual=${handle.info.actualBackend} renderer=${handle.info.rendererKind}`;
+} catch (e) {
+  window.__p4c = { done: true, error: String(e?.stack || e), revision: REVISION };
+  status.textContent = "P4 atmosphere instruments error: " + window.__p4c.error;
+}
+</script>
+</body>
+</html>
